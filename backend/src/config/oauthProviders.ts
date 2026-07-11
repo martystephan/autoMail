@@ -11,7 +11,11 @@ export interface OAuthProviderConfig {
   };
 }
 
-export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
+// Set DISABLE_MICROSOFT_OAUTH=true to remove Microsoft as a provider.
+// This disables authorize/callback/refresh and hides it from the providers list.
+const microsoftDisabled = process.env.DISABLE_MICROSOFT_OAUTH === "true";
+
+const microsoftProvider: Record<string, OAuthProviderConfig> = {
   microsoft: {
     name: "Microsoft",
     clientId: process.env.MICROSOFT_CLIENT_ID || "",
@@ -31,6 +35,10 @@ export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
       port: 993,
     },
   },
+};
+
+export const OAUTH_PROVIDERS: Record<string, OAuthProviderConfig> = {
+  ...(microsoftDisabled ? {} : microsoftProvider),
 };
 
 export function isValidProvider(provider: string): boolean {

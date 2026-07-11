@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import type { MailAccount } from "../../api/mailAccounts";
-import { startOAuthFlow } from "../../api/oauth";
+import { startOAuthFlow, getOAuthProviders } from "../../api/oauth";
 import { Button, Input, Label, Alert, Dialog } from "../ui";
 import { Mail } from "lucide-react";
 
@@ -27,6 +27,15 @@ export default function MailAccountForm({
   });
   const [oauthLoading, setOauthLoading] = useState(false);
   const [oauthError, setOauthError] = useState<string | null>(null);
+  const [microsoftAvailable, setMicrosoftAvailable] = useState(true);
+
+  useEffect(() => {
+    getOAuthProviders()
+      .then(({ providers }) =>
+        setMicrosoftAvailable(providers.some((p) => p.id === "microsoft"))
+      )
+      .catch(() => setMicrosoftAvailable(true));
+  }, []);
 
   useEffect(() => {
     if (account) {
@@ -127,7 +136,11 @@ export default function MailAccountForm({
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
           <Label>Account Type</Label>
-          <div className="mt-2 grid grid-cols-2 gap-3 h-12">
+          <div
+            className={`mt-2 grid gap-3 h-12 ${
+              microsoftAvailable ? "grid-cols-2" : "grid-cols-1"
+            }`}
+          >
             <Button
               type="button"
               variant="secondary"
@@ -141,21 +154,27 @@ export default function MailAccountForm({
               <Mail className="size-4" />
               IMAP
             </Button>
-            <Button
-              type="button"
-              variant="secondary"
-              onClick={() => setFormData({ ...formData, type: "microsoft" })}
-              className={
-                formData.type === "microsoft"
-                  ? "bg-purple-50! text-purple-700! border-purple-300!"
-                  : ""
-              }
-            >
-              <svg className="h-4 w-4" viewBox="0 0 23 23" fill="currentColor">
-                <path d="M0 0h11v11H0zM12 0h11v11H12zM0 12h11v11H12z" />
-              </svg>
-              Microsoft
-            </Button>
+            {microsoftAvailable && (
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={() => setFormData({ ...formData, type: "microsoft" })}
+                className={
+                  formData.type === "microsoft"
+                    ? "bg-purple-50! text-purple-700! border-purple-300!"
+                    : ""
+                }
+              >
+                <svg
+                  className="h-4 w-4"
+                  viewBox="0 0 23 23"
+                  fill="currentColor"
+                >
+                  <path d="M0 0h11v11H0zM12 0h11v11H12zM0 12h11v11H12z" />
+                </svg>
+                Microsoft
+              </Button>
+            )}
           </div>
         </div>
 
