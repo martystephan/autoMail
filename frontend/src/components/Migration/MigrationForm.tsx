@@ -13,7 +13,6 @@ import {
 
 interface MigrationFormProps {
   accounts: MailAccount[];
-  defaultExcludedFolders: string[];
   onPreview: (sourceAccountId: number, excludedFolders: string[]) => void;
   onExecute: (
     sourceAccountId: number,
@@ -27,7 +26,6 @@ interface MigrationFormProps {
 
 export default function MigrationForm({
   accounts,
-  defaultExcludedFolders,
   onPreview,
   onExecute,
   onReset,
@@ -51,20 +49,8 @@ export default function MigrationForm({
     try {
       const boxes = await getMailboxes(sourceAccountId);
       setMailboxes(boxes);
-      // Select all mailboxes by default, except those in defaultExcludedFolders
-      const selected = new Set(
-        boxes
-          .filter((box) => {
-            const isExcluded = defaultExcludedFolders.some(
-              (excluded) =>
-                box.path.toLowerCase() === excluded.toLowerCase() ||
-                box.specialUse === excluded
-            );
-            return !isExcluded;
-          })
-          .map((box) => box.path)
-      );
-      setSelectedMailboxes(selected);
+      // Select all mailboxes by default
+      setSelectedMailboxes(new Set(boxes.map((box) => box.path)));
     } catch (error) {
       setMailboxError("Failed to fetch mailboxes");
       console.error("Error fetching mailboxes:", error);
@@ -82,7 +68,7 @@ export default function MigrationForm({
       return;
     }
     fetchMailboxes();
-  }, [sourceAccountId, defaultExcludedFolders]);
+  }, [sourceAccountId]);
 
   const getExcludedFolders = (): string[] => {
     return mailboxes
@@ -325,7 +311,7 @@ export default function MigrationForm({
             loading={isExecuting}
             disabled={!canExecute || isExecuting}
           >
-            {isExecuting ? "Executing Migration..." : "Execute Migration"}
+            {isExecuting ? "Migration Running..." : "Start Migration"}
           </Button>
         </div>
       </CardContent>

@@ -3,12 +3,17 @@ import { toast } from "sonner";
 import { getMailAccounts, type MailAccount } from "../api/mailAccounts";
 import {
   getMigrationPreview,
-  executeMigration,
-  getDefaultExcludedFolders,
+  startMigration,
+  getMigrationJob,
+  cancelMigrationJob,
+  listMigrationJobs,
+  isJobActive,
   type MigrationPreview,
-  type MigrationResult,
+  type MigrationJobDetail,
+  type MigrationJobStatus,
 } from "../api/migration";
 import MigrationForm from "../components/Migration/MigrationForm";
+import MigrationProgress from "../components/Migration/MigrationProgress";
 import {
   Alert,
   Card,
@@ -19,15 +24,37 @@ import {
 } from "../components/ui";
 import { PageHeader } from "../components/ui/PageHeader";
 
+const POLL_INTERVAL_MS = 2000;
+
+function finishedToast(status: MigrationJobStatus, detail: MigrationJobDetail) {
+  const { copiedMessages, skippedMessages, failedMessages } = detail.job;
+  const summary = `${copiedMessages} copied, ${skippedMessages} skipped, ${failedMessages} failed`;
+  switch (status) {
+    case "completed":
+      toast.success(`Migration completed: ${summary}`);
+      break;
+    case "completed_with_errors":
+      toast.warning(
+        `Migration completed with errors: ${summary}. Run it again to retry the failed messages.`
+      );
+      break;
+    case "cancelled":
+      toast.info(
+        `Migration cancelled: ${summary}. Run it again to resume — copied messages are skipped.`
+      );
+      break;
+    default:
+      toast.error(`Migration ${status}: ${detail.job.error || summary}`);
+  }
+}
+
 export default function MigrationPage() {
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [loading, setLoading] = useState(true);
-  const [defaultExcludedFolders, setDefaultExcludedFolders] = useState<
-    string[]
-  >([]);
   const [preview, setPreview] = useState<MigrationPreview | null>(null);
-  const [result, setResult] = useState<MigrationResult | null>(null);
-  const [isExecuting, setIsExecuting] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<number | null>(null);
+  const [jobDetail, setJobDetail] = useState<MigrationJobDetail | null>(null);
+  const [isCancelling, setIsCancelling] = useState(false);
 
   useEffect(() => {
     loadData();
@@ -36,12 +63,17 @@ export default function MigrationPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [accountsData, defaultFolders] = await Promise.all([
+      const [accountsData, jobs] = await Promise.all([
         getMailAccounts(),
-        getDefaultExcludedFolders(),
+        listMigrationJobs(1),
       ]);
       setAccounts(accountsData);
-      setDefaultExcludedFolders(defaultFolders.excludedFolders);
+
+      // Reattach to a migration that is still running (e.g. after a page reload)
+      const latest = jobs[0];
+      if (latest && isJobActive(latest.status)) {
+        setActiveJobId(latest.id);
+      }
     } catch (error) {
       toast.error(`Failed to load data: ${error}`);
     } finally {
@@ -49,13 +81,42 @@ export default function MigrationPage() {
     }
   };
 
+  // Poll the active job until it reaches a terminal state
+  useEffect(() => {
+    if (activeJobId == null) return;
+
+    let stopped = false;
+
+    const tick = async () => {
+      try {
+        const detail = await getMigrationJob(activeJobId);
+        if (stopped) return;
+        setJobDetail(detail);
+        if (!isJobActive(detail.job.status)) {
+          finishedToast(detail.job.status, detail);
+          setActiveJobId(null);
+          setIsCancelling(false);
+        }
+      } catch {
+        // Transient polling error (e.g. brief network hiccup) — keep trying
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, POLL_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [activeJobId]);
+
   const handlePreview = async (
     sourceAccountId: number,
     excludedFolders: string[]
   ) => {
     try {
       setPreview(null);
-      setResult(null);
+      setJobDetail(null);
       const previewData = await getMigrationPreview({
         sourceAccountId,
         excludedFolders,
@@ -72,40 +133,44 @@ export default function MigrationPage() {
     excludedFolders: string[]
   ) => {
     try {
-      setIsExecuting(true);
-      setResult(null);
-      const migrationResult = await executeMigration({
+      setJobDetail(null);
+      const { jobId } = await startMigration({
         sourceAccountId,
         targetAccountId,
         excludedFolders,
       });
-      setResult(migrationResult);
-      if (migrationResult.success) {
-        toast.success(
-          `Migration completed: ${migrationResult.totalMessagesCopied} messages copied`
-        );
-      } else {
-        toast.error(
-          `Migration completed with errors: ${migrationResult.errors.length} errors`
-        );
-      }
+      setActiveJobId(jobId);
+      toast.info("Migration started — it runs in the background in small batches.");
     } catch (error) {
-      toast.error(`Migration failed: ${error}`);
-    } finally {
-      setIsExecuting(false);
+      toast.error(`Failed to start migration: ${error}`);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (activeJobId == null) return;
+    try {
+      setIsCancelling(true);
+      await cancelMigrationJob(activeJobId);
+    } catch (error) {
+      setIsCancelling(false);
+      toast.error(`Failed to cancel migration: ${error}`);
     }
   };
 
   const handleReset = () => {
     setPreview(null);
-    setResult(null);
+    if (activeJobId == null) {
+      setJobDetail(null);
+    }
   };
+
+  const isExecuting = activeJobId != null;
 
   return (
     <div className="space-y-4">
       <PageHeader
         title="Migration"
-        description="Copy folders and messages from one account to another."
+        description="Copy folders and messages from one account to another. Migrations run in batches, every step is logged, and re-running skips messages that were already copied."
       />
 
       {accounts.length < 2 && (
@@ -122,7 +187,6 @@ export default function MigrationPage() {
         <>
           <MigrationForm
             accounts={accounts}
-            defaultExcludedFolders={defaultExcludedFolders}
             onPreview={handlePreview}
             onExecute={handleExecute}
             onReset={handleReset}
@@ -130,7 +194,7 @@ export default function MigrationPage() {
             hasPreview={preview !== null}
           />
 
-          {preview && !result && (
+          {preview && !jobDetail && (
             <Card>
               <CardHeader className="border-b border-neutral-200">
                 <CardTitle>Migration Preview</CardTitle>
@@ -192,44 +256,12 @@ export default function MigrationPage() {
             </Card>
           )}
 
-          {result && (
-            <Alert variant={result.success ? "success" : "error"}>
-              <div className="space-y-3">
-                <div className="font-medium">
-                  {result.success
-                    ? "Migration Completed Successfully"
-                    : "Migration Completed with Errors"}
-                </div>
-                <div>
-                  Total Messages Copied: {result.totalMessagesCopied}
-                </div>
-                {result.foldersCreated.length > 0 && (
-                  <div>
-                    Folders Created: {result.foldersCreated.join(", ")}
-                  </div>
-                )}
-                {result.foldersCopied.length > 0 && (
-                  <div>
-                    Folders Copied:{" "}
-                    {result.foldersCopied
-                      .map((f) => `${f.path} (${f.messageCount})`)
-                      .join(", ")}
-                  </div>
-                )}
-                {result.errors.length > 0 && (
-                  <div>
-                    <div className="font-medium mb-1">Errors:</div>
-                    <ul className="list-disc list-inside">
-                      {result.errors.map((error, index) => (
-                        <li key={index}>
-                          {error.folder}: {error.error}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            </Alert>
+          {jobDetail && (
+            <MigrationProgress
+              detail={jobDetail}
+              onCancel={handleCancel}
+              isCancelling={isCancelling}
+            />
           )}
         </>
       )}

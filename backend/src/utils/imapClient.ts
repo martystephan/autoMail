@@ -8,11 +8,8 @@ export interface ImapCredentials {
   accessToken?: string;
 }
 
-export async function withImapClient<T>(
-  credentials: ImapCredentials,
-  callback: (client: ImapFlow) => Promise<T>
-): Promise<T> {
-  const client = new ImapFlow({
+export function buildImapClient(credentials: ImapCredentials): ImapFlow {
+  return new ImapFlow({
     host: credentials.host,
     port: credentials.port,
     secure: true,
@@ -26,11 +23,31 @@ export async function withImapClient<T>(
           pass: credentials.password!,
         },
   });
+}
 
+// Close a client without throwing, falling back to a hard close if the
+// server no longer responds to LOGOUT.
+export async function safeCloseImapClient(client: ImapFlow): Promise<void> {
   try {
-    await client.connect();
+    await client.logout();
+  } catch {
+    try {
+      client.close();
+    } catch {
+      // Connection is already gone
+    }
+  }
+}
+
+export async function withImapClient<T>(
+  credentials: ImapCredentials,
+  callback: (client: ImapFlow) => Promise<T>
+): Promise<T> {
+  const client = buildImapClient(credentials);
+  await client.connect();
+  try {
     return await callback(client);
   } finally {
-    await client.logout();
+    await safeCloseImapClient(client);
   }
 }

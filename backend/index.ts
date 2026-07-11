@@ -11,6 +11,7 @@ import migrationRouter from "./src/routes/migration";
 import authRouter from "./src/routes/auth";
 import { requireAuth } from "./src/middleware/auth";
 import { startScheduler } from "./src/services/automation";
+import { recoverInterruptedJobs } from "./src/services/migration";
 
 const app = express();
 app.use(cors());
@@ -31,6 +32,9 @@ app.use("/api/migration", requireAuth, migrationRouter);
 // Start server
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
+
+  // Migration jobs left in an active state belong to a previous process
+  recoverInterruptedJobs();
 
   // Start automation scheduler
   startScheduler();
