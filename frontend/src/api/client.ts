@@ -1,3 +1,5 @@
+import { toApiError } from './errors';
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 function getAuthToken(): string | null {
@@ -11,14 +13,19 @@ export async function apiRequest<T>(
   const url = `${API_BASE_URL}${endpoint}`;
   const token = getAuthToken();
 
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options?.headers,
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        ...options?.headers,
+      },
+    });
+  } catch (error) {
+    throw toApiError(error);
+  }
 
   if (!response.ok) {
     if (response.status === 401) {

@@ -1,4 +1,14 @@
+import { toApiError } from "./errors";
+
 const API_BASE_URL = import.meta.env.VITE_API_URL || "/api";
+
+async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch (error) {
+    throw toApiError(error);
+  }
+}
 
 export interface User {
   id: number;
@@ -15,7 +25,7 @@ export interface SetupStatus {
 }
 
 export async function getSetupStatus(): Promise<SetupStatus> {
-  const response = await fetch(`${API_BASE_URL}/auth/setup-status`);
+  const response = await authFetch(`${API_BASE_URL}/auth/setup-status`);
   if (!response.ok) {
     throw new Error("Failed to check setup status");
   }
@@ -26,7 +36,7 @@ export async function register(
   username: string,
   password: string
 ): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/auth/register`, {
+  const response = await authFetch(`${API_BASE_URL}/auth/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -44,7 +54,7 @@ export async function login(
   username: string,
   password: string
 ): Promise<AuthResponse> {
-  const response = await fetch(`${API_BASE_URL}/auth/login`, {
+  const response = await authFetch(`${API_BASE_URL}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ username, password }),
@@ -59,7 +69,7 @@ export async function login(
 }
 
 export async function getCurrentUser(token: string): Promise<{ user: User }> {
-  const response = await fetch(`${API_BASE_URL}/auth/me`, {
+  const response = await authFetch(`${API_BASE_URL}/auth/me`, {
     headers: { Authorization: `Bearer ${token}` },
   });
 
