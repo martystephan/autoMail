@@ -10,6 +10,7 @@ import {
   findActiveMigrationJob,
   DEFAULT_EXCLUDED_FOLDERS,
 } from '../services/migration';
+import { findActiveBulkRun } from '../services/bulkMigration';
 import { HTTP_STATUS, ERROR_MESSAGES } from '../constants';
 
 const router = Router();
@@ -89,6 +90,15 @@ router.post('/execute', (req: Request, res: Response) => {
       res.status(HTTP_STATUS.CONFLICT).json({
         error: `Another migration (job #${activeJob.id}) is already running`,
         jobId: activeJob.id,
+      });
+      return;
+    }
+
+    // A bulk run also counts, even between two of its pair jobs
+    const activeRun = findActiveBulkRun();
+    if (activeRun) {
+      res.status(HTTP_STATUS.CONFLICT).json({
+        error: `A bulk migration (run #${activeRun.id}) is already running`,
       });
       return;
     }

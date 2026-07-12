@@ -23,10 +23,15 @@ export type MigrationJobStatus =
   | 'cancelled'
   | 'interrupted';
 
+export type MigrationMode = 'single' | 'bulk';
+
 export interface MigrationJob {
   id: number;
-  sourceAccountId: number;
-  targetAccountId: number;
+  sourceAccountId: number | null;
+  targetAccountId: number | null;
+  mode: MigrationMode;
+  bulkRunId: number | null;
+  bulkEmail: string | null;
   status: MigrationJobStatus;
   totalFolders: number;
   totalMessages: number;

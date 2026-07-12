@@ -54,12 +54,16 @@ interface MigrationProgressProps {
   detail: MigrationJobDetail;
   onCancel: () => void;
   isCancelling: boolean;
+  // Bulk runs render this inside their own progress card and cancel the whole
+  // run instead of the single pair job
+  hideCancel?: boolean;
 }
 
 export default function MigrationProgress({
   detail,
   onCancel,
   isCancelling,
+  hideCancel = false,
 }: MigrationProgressProps) {
   const { job, folders, logs } = detail;
   const [showLogs, setShowLogs] = useState(false);
@@ -91,7 +95,7 @@ export default function MigrationProgress({
                 : job.error || "Messages are copied in small batches; progress is saved continuously."}
             </CardDescription>
           </div>
-          {active && (
+          {active && !hideCancel && (
             <Button
               variant="secondary"
               onClick={onCancel}
@@ -133,7 +137,7 @@ export default function MigrationProgress({
               {job.skippedMessages}
             </div>
             <div className="text-xs text-neutral-500">
-              Skipped (already migrated)
+              Skipped (already on target)
             </div>
           </div>
           <div className="rounded-lg bg-red-50 py-2">

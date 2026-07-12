@@ -8,6 +8,7 @@ import mailAccountsRouter from "./src/routes/mailAccounts";
 import automationFlowsRouter from "./src/routes/automationFlows";
 import oauthRouter, { oauthPublicRouter } from "./src/routes/oauth";
 import migrationRouter from "./src/routes/migration";
+import bulkMigrationRouter from "./src/routes/bulkMigration";
 import authRouter from "./src/routes/auth";
 import { requireAuth } from "./src/middleware/auth";
 import { startScheduler } from "./src/services/automation";
@@ -27,13 +28,15 @@ app.use("/api/oauth", oauthPublicRouter); // OAuth callback (called by provider)
 app.use("/api/mail-accounts", requireAuth, mailAccountsRouter);
 app.use("/api/automation-flows", requireAuth, automationFlowsRouter);
 app.use("/api/oauth", requireAuth, oauthRouter);
+app.use("/api/migration/bulk", requireAuth, bulkMigrationRouter);
 app.use("/api/migration", requireAuth, migrationRouter);
 
 // Start server
 app.listen(PORT, () => {
   console.log(`Backend running on http://localhost:${PORT}`);
 
-  // Migration jobs left in an active state belong to a previous process
+  // Jobs/runs still marked active belong to a previous process — relabel them
+  // as interrupted. This is display-only: a new run never reads old run data.
   recoverInterruptedJobs();
 
   // Start automation scheduler

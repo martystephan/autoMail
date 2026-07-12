@@ -12,8 +12,10 @@ import {
   type MigrationJobDetail,
   type MigrationJobStatus,
 } from "../api/migration";
+import { listBulkRuns } from "../api/bulkMigration";
 import MigrationForm from "../components/Migration/MigrationForm";
 import MigrationProgress from "../components/Migration/MigrationProgress";
+import BulkMigrationPanel from "../components/Migration/BulkMigrationPanel";
 import {
   Alert,
   Card,
@@ -40,7 +42,7 @@ function finishedToast(status: MigrationJobStatus, detail: MigrationJobDetail) {
       break;
     case "cancelled":
       toast.info(
-        `Migration cancelled: ${summary}. Run it again to resume — copied messages are skipped.`
+        `Migration cancelled: ${summary}. Run it again to resume — messages already on the target are skipped.`
       );
       break;
     default:
@@ -48,7 +50,10 @@ function finishedToast(status: MigrationJobStatus, detail: MigrationJobDetail) {
   }
 }
 
+type MigrationMode = "single" | "bulk";
+
 export default function MigrationPage() {
+  const [mode, setMode] = useState<MigrationMode>("single");
   const [accounts, setAccounts] = useState<MailAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [preview, setPreview] = useState<MigrationPreview | null>(null);
@@ -63,16 +68,24 @@ export default function MigrationPage() {
   const loadData = async () => {
     try {
       setLoading(true);
-      const [accountsData, jobs] = await Promise.all([
+      const [accountsData, jobs, bulkRuns] = await Promise.all([
         getMailAccounts(),
         listMigrationJobs(1),
+        listBulkRuns(1),
       ]);
       setAccounts(accountsData);
 
-      // Reattach to a migration that is still running (e.g. after a page reload)
+      // Reattach to a migration that is still running (e.g. after a page
+      // reload). Bulk pair jobs are handled by the bulk panel, not here.
       const latest = jobs[0];
-      if (latest && isJobActive(latest.status)) {
+      if (latest && latest.mode === "single" && isJobActive(latest.status)) {
         setActiveJobId(latest.id);
+      }
+
+      // An active bulk run opens the bulk tab, which reattaches on its own
+      const latestRun = bulkRuns[0];
+      if (latestRun && isJobActive(latestRun.status)) {
+        setMode("bulk");
       }
     } catch (error) {
       toast.error(`Failed to load data: ${error}`);
@@ -170,21 +183,47 @@ export default function MigrationPage() {
     <div className="space-y-4">
       <PageHeader
         title="Migration"
-        description="Copy folders and messages from one account to another. Migrations run in batches, every step is logged, and re-running skips messages that were already copied."
+        description="Copy folders and messages from one account to another. Migrations run in batches, every step is logged, and messages that already exist on the target are skipped — so re-running is always safe."
       />
 
-      {accounts.length < 2 && (
-        <Alert variant="warning">
-          You need at least two mail accounts to perform a migration.
-        </Alert>
-      )}
+      <div className="inline-flex rounded-lg border border-neutral-300 p-0.5 bg-neutral-100">
+        {(
+          [
+            ["single", "Single Account"],
+            ["bulk", "Bulk (CSV)"],
+          ] as [MigrationMode, string][]
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setMode(value)}
+            className={`px-4 py-1.5 rounded-md text-sm font-medium transition-colors ${
+              mode === value
+                ? "bg-white text-neutral-900 shadow-sm"
+                : "text-neutral-500 hover:text-neutral-800"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
 
-      {loading ? (
-        <div className="text-center py-12">
-          <p className="text-neutral-500">Loading...</p>
-        </div>
+      {mode === "bulk" ? (
+        <BulkMigrationPanel />
       ) : (
         <>
+          {accounts.length < 2 && (
+            <Alert variant="warning">
+              You need at least two mail accounts to perform a migration.
+            </Alert>
+          )}
+
+          {loading ? (
+            <div className="text-center py-12">
+              <p className="text-neutral-500">Loading...</p>
+            </div>
+          ) : (
+            <>
           <MigrationForm
             accounts={accounts}
             onPreview={handlePreview}
@@ -256,12 +295,14 @@ export default function MigrationPage() {
             </Card>
           )}
 
-          {jobDetail && (
-            <MigrationProgress
-              detail={jobDetail}
-              onCancel={handleCancel}
-              isCancelling={isCancelling}
-            />
+              {jobDetail && (
+                <MigrationProgress
+                  detail={jobDetail}
+                  onCancel={handleCancel}
+                  isCancelling={isCancelling}
+                />
+              )}
+            </>
           )}
         </>
       )}
