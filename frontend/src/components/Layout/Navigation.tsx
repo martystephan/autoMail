@@ -2,7 +2,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import type { ReactNode } from "react";
 import { Button } from "../ui";
-import { Archive, ArrowRightLeft, Mail, Repeat } from "lucide-react";
+import { Archive, ArrowRightLeft, Mail, PlugZap, Repeat } from "lucide-react";
 
 interface NavItemProps {
   to: string;
@@ -43,6 +43,11 @@ const navItems = [
     to: "/archive",
     icon: <Archive className="size-4" />,
     label: "Archive",
+  },
+  {
+    to: "/connection-test",
+    icon: <PlugZap className="size-4" />,
+    label: "Connection Test",
   },
 ];
 

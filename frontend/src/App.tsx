@@ -11,6 +11,7 @@ import MailAccountsPage from "./pages/MailAccountsPage";
 import AutomationFlowsPage from "./pages/AutomationFlowsPage";
 import MigrationPage from "./pages/MigrationPage";
 import ArchivePage from "./pages/ArchivePage";
+import ConnectionTestPage from "./pages/ConnectionTestPage";
 import OAuthCallbackPage from "./pages/OAuthCallbackPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -141,6 +142,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <Layout>
               <ArchivePage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/connection-test"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <ConnectionTestPage />
             </Layout>
           </ProtectedRoute>
         }

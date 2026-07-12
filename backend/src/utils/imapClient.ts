@@ -6,6 +6,9 @@ export interface ImapCredentials {
   user: string;
   password?: string;
   accessToken?: string;
+  // Milliseconds; imapflow defaults (90s/16s) apply when unset
+  connectionTimeout?: number;
+  greetingTimeout?: number;
 }
 
 export function buildImapClient(credentials: ImapCredentials): ImapFlow {
@@ -13,6 +16,8 @@ export function buildImapClient(credentials: ImapCredentials): ImapFlow {
     host: credentials.host,
     port: credentials.port,
     secure: true,
+    ...(credentials.connectionTimeout !== undefined && { connectionTimeout: credentials.connectionTimeout }),
+    ...(credentials.greetingTimeout !== undefined && { greetingTimeout: credentials.greetingTimeout }),
     auth: credentials.accessToken
       ? {
           user: credentials.user,

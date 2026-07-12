@@ -220,6 +220,39 @@ export interface ArchiveLog {
   createdAt: string;
 }
 
+export interface ConnectionTestRun {
+  id: number;
+  status: MigrationJobStatus;
+  imapHost: string;
+  imapPort: number;
+  totalAccounts: number;
+  processedAccounts: number;
+  okAccounts: number;
+  failedAccounts: number;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export type ConnectionTestResultStatus =
+  | 'pending'
+  | 'running'
+  | 'ok'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted';
+
+export interface ConnectionTestResult {
+  id: number;
+  runId: number;
+  email: string;
+  username: string;
+  status: ConnectionTestResultStatus;
+  error: string | null;
+  testedAt: string | null;
+}
+
 // Initialize database
 const dbPath = process.env.DATABASE_PATH || path.join(__dirname, '../../data/automail.db');
 
@@ -474,6 +507,36 @@ db.exec(`
     FOREIGN KEY (jobId) REFERENCES archive_jobs(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_archive_logs_job ON archive_logs(jobId);
+
+  -- Connection test runs: every row of an uploaded CSV gets an IMAP login
+  -- attempt and its verdict is kept for display. Passwords are NEVER stored —
+  -- a run interrupted by a restart cannot resume and needs a fresh upload.
+  CREATE TABLE IF NOT EXISTS connection_test_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    imapHost TEXT NOT NULL,
+    imapPort INTEGER NOT NULL,
+    totalAccounts INTEGER NOT NULL DEFAULT 0,
+    processedAccounts INTEGER NOT NULL DEFAULT 0,
+    okAccounts INTEGER NOT NULL DEFAULT 0,
+    failedAccounts INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    startedAt TEXT,
+    completedAt TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS connection_test_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    runId INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    username TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    testedAt TEXT,
+    FOREIGN KEY (runId) REFERENCES connection_test_runs(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_connection_test_results_run ON connection_test_results(runId);
 `);
 
 // One-time rebuild of migration_jobs for databases created before bulk mode:
