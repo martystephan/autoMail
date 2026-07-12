@@ -33,10 +33,11 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 
-# Database
+# Database and runtime data (SQLite DB, archive zips, temp .eml files)
 *.db
 *.sqlite
 *.sqlite3
+backend/data/
 backend/prisma/dev.db*
 backend/prisma/migrations/
 

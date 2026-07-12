@@ -151,6 +151,75 @@ export interface BulkRun {
   completedAt: string | null;
 }
 
+export interface ArchiveAccount {
+  id: number;
+  email: string;
+  username: string; // IMAP login
+  password: string; // AES-encrypted at rest
+  imapHost: string;
+  imapPort: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ArchiveRun {
+  id: number;
+  status: MigrationJobStatus;
+  totalAccounts: number;
+  completedAccounts: number;
+  failedAccounts: number;
+  currentJobId: number | null;
+  currentEmail: string | null;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ArchiveJob {
+  id: number;
+  runId: number;
+  archiveAccountId: number | null;
+  email: string;
+  status: MigrationJobStatus;
+  excludedFolders: string; // JSON array of special-use flags ('\Trash', '\Junk')
+  totalFolders: number;
+  totalMessages: number;
+  processedMessages: number;
+  savedMessages: number;
+  failedMessages: number;
+  currentFolder: string | null;
+  zipPath: string | null; // relative to ARCHIVE_DIR, set once the zip exists
+  zipSize: number | null;
+  error: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ArchiveFolder {
+  id: number;
+  jobId: number;
+  path: string;
+  status: MigrationFolderStatus;
+  messageCount: number;
+  savedCount: number;
+  failedCount: number;
+  error: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ArchiveLog {
+  id: number;
+  jobId: number;
+  level: string; // info | warn | error
+  folderPath: string | null;
+  uid: number | null;
+  message: string;
+  createdAt: string;
+}
+
 // Initialize database
 const dbPath = process.env.DATABASE_PATH || path.join(__dirname, '../../data/automail.db');
 
@@ -325,6 +394,86 @@ db.exec(`
     FOREIGN KEY (jobId) REFERENCES migration_jobs(id) ON DELETE CASCADE
   );
   CREATE INDEX IF NOT EXISTS idx_migration_logs_job ON migration_logs(jobId);
+
+  -- The archive project: imported CSV accounts and run history. Read-only
+  -- exports — each run writes one zip of .eml files per account; the zips
+  -- stay on disk until the user deletes the run or the project.
+  CREATE TABLE IF NOT EXISTS archive_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL UNIQUE,
+    username TEXT NOT NULL,
+    password TEXT NOT NULL,
+    imapHost TEXT NOT NULL,
+    imapPort INTEGER NOT NULL,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- One archive run = a sequential batch of per-account archive jobs
+  CREATE TABLE IF NOT EXISTS archive_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    totalAccounts INTEGER NOT NULL DEFAULT 0,
+    completedAccounts INTEGER NOT NULL DEFAULT 0,
+    failedAccounts INTEGER NOT NULL DEFAULT 0,
+    currentJobId INTEGER,
+    currentEmail TEXT,
+    error TEXT,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    startedAt TEXT,
+    completedAt TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS archive_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    runId INTEGER NOT NULL,
+    archiveAccountId INTEGER,
+    email TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    excludedFolders TEXT NOT NULL DEFAULT '[]',
+    totalFolders INTEGER NOT NULL DEFAULT 0,
+    totalMessages INTEGER NOT NULL DEFAULT 0,
+    processedMessages INTEGER NOT NULL DEFAULT 0,
+    savedMessages INTEGER NOT NULL DEFAULT 0,
+    failedMessages INTEGER NOT NULL DEFAULT 0,
+    currentFolder TEXT,
+    zipPath TEXT,
+    zipSize INTEGER,
+    error TEXT,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    startedAt TEXT,
+    completedAt TEXT,
+    FOREIGN KEY (runId) REFERENCES archive_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (archiveAccountId) REFERENCES archive_accounts(id) ON DELETE SET NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_archive_jobs_run ON archive_jobs(runId);
+
+  CREATE TABLE IF NOT EXISTS archive_folders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    jobId INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    messageCount INTEGER NOT NULL DEFAULT 0,
+    savedCount INTEGER NOT NULL DEFAULT 0,
+    failedCount INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    startedAt TEXT,
+    completedAt TEXT,
+    FOREIGN KEY (jobId) REFERENCES archive_jobs(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_archive_folders_job ON archive_folders(jobId);
+
+  CREATE TABLE IF NOT EXISTS archive_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    jobId INTEGER NOT NULL,
+    level TEXT NOT NULL DEFAULT 'info',
+    folderPath TEXT,
+    uid INTEGER,
+    message TEXT NOT NULL,
+    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (jobId) REFERENCES archive_jobs(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_archive_logs_job ON archive_logs(jobId);
 `);
 
 // One-time rebuild of migration_jobs for databases created before bulk mode:

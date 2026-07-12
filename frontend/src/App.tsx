@@ -10,6 +10,7 @@ import Layout from "./components/Layout/Layout";
 import MailAccountsPage from "./pages/MailAccountsPage";
 import AutomationFlowsPage from "./pages/AutomationFlowsPage";
 import MigrationPage from "./pages/MigrationPage";
+import ArchivePage from "./pages/ArchivePage";
 import OAuthCallbackPage from "./pages/OAuthCallbackPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
@@ -130,6 +131,16 @@ function AppRoutes() {
           <ProtectedRoute>
             <Layout>
               <MigrationPage />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/archive"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <ArchivePage />
             </Layout>
           </ProtectedRoute>
         }

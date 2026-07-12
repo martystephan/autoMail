@@ -326,12 +326,12 @@ function detectTargetLayout(
 // actually advertises; a name is only accepted for a role that no flagged
 // folder claims — a folder merely NAMED like a special folder (e.g.
 // "Deleted Messages" next to a real \Trash) stays an ordinary folder.
-interface HeadRole {
+export interface HeadRole {
   role: FolderRole;
   flagged: boolean;
 }
 
-function detectSourceHeadRoles(folders: FolderInfo[]): Map<string, HeadRole> {
+export function detectSourceHeadRoles(folders: FolderInfo[]): Map<string, HeadRole> {
   const headRoles = new Map<string, HeadRole>();
   const claimed = new Set<FolderRole>();
 
@@ -360,7 +360,7 @@ function detectSourceHeadRoles(folders: FolderInfo[]): Map<string, HeadRole> {
 // Skip-trash/skip-junk excludes ONLY folders the server flags with the
 // special-use attribute (and their subtrees) — never folders that merely have
 // a matching name. Name recognition is used for mapping alone.
-function applyRoleExclusions(
+export function applyRoleExclusions(
   folders: FolderInfo[],
   headRoles: Map<string, HeadRole>,
   options: { excludeTrash: boolean; excludeJunk: boolean }

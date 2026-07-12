@@ -2,7 +2,7 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import type { ReactNode } from "react";
 import { Button } from "../ui";
-import { ArrowRightLeft, Mail, Repeat } from "lucide-react";
+import { Archive, ArrowRightLeft, Mail, Repeat } from "lucide-react";
 
 interface NavItemProps {
   to: string;
@@ -38,6 +38,11 @@ const navItems = [
     to: "/migration",
     icon: <ArrowRightLeft className="size-4" />,
     label: "Migration",
+  },
+  {
+    to: "/archive",
+    icon: <Archive className="size-4" />,
+    label: "Archive",
   },
 ];
 
