@@ -39,7 +39,6 @@ Thumbs.db
 *.sqlite3
 backend/data/
 backend/prisma/dev.db*
-backend/prisma/migrations/
 
 # Local config
 *.local
