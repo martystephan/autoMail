@@ -1,4 +1,4 @@
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { useAuth } from "../../context/AuthContext";
 import type { ReactNode } from "react";
 import { Button } from "../ui";
@@ -53,12 +53,11 @@ const navItems = [
 
 export default function Navigation() {
   const location = useLocation();
-  const navigate = useNavigate();
   const { logout } = useAuth();
 
-  const handleLogout = () => {
-    logout();
-    navigate("/login");
+  // Clearing the session makes the AuthGate swap to the login page in place
+  const handleLogout = async () => {
+    await logout();
   };
 
   return (

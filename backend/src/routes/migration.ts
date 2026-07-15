@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import db, { MailAccount } from '../utils/db';
+import prisma from '../utils/prisma';
 import {
   getMigrationPreview,
   createMigrationJob,
@@ -27,7 +27,7 @@ router.post('/preview', async (req: Request, res: Response) => {
       return;
     }
 
-    const sourceAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(sourceAccountId) as MailAccount | undefined;
+    const sourceAccount = await prisma.mailAccount.findUnique({ where: { id: sourceAccountId } });
 
     if (!sourceAccount) {
       res.status(HTTP_STATUS.NOT_FOUND).json({
@@ -48,7 +48,7 @@ router.post('/preview', async (req: Request, res: Response) => {
 });
 
 // POST /api/migration/execute - Start a migration job (runs in the background)
-router.post('/execute', (req: Request, res: Response) => {
+router.post('/execute', async (req: Request, res: Response) => {
   try {
     const { sourceAccountId, targetAccountId, excludedFolders } = req.body;
 
@@ -66,8 +66,8 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const sourceAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(sourceAccountId) as MailAccount | undefined;
-    const targetAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(targetAccountId) as MailAccount | undefined;
+    const sourceAccount = await prisma.mailAccount.findUnique({ where: { id: sourceAccountId } });
+    const targetAccount = await prisma.mailAccount.findUnique({ where: { id: targetAccountId } });
 
     if (!sourceAccount) {
       res.status(HTTP_STATUS.NOT_FOUND).json({
@@ -85,7 +85,7 @@ router.post('/execute', (req: Request, res: Response) => {
 
     // Only one migration at a time keeps the load on the mail servers sane
     // and the progress unambiguous
-    const activeJob = findActiveMigrationJob();
+    const activeJob = await findActiveMigrationJob();
     if (activeJob) {
       res.status(HTTP_STATUS.CONFLICT).json({
         error: `Another migration (job #${activeJob.id}) is already running`,
@@ -95,7 +95,7 @@ router.post('/execute', (req: Request, res: Response) => {
     }
 
     // A bulk run also counts, even between two of its pair jobs
-    const activeRun = findActiveBulkRun();
+    const activeRun = await findActiveBulkRun();
     if (activeRun) {
       res.status(HTTP_STATUS.CONFLICT).json({
         error: `A bulk migration (run #${activeRun.id}) is already running`,
@@ -103,7 +103,7 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const job = createMigrationJob(sourceAccountId, targetAccountId, excludedFolders ?? undefined);
+    const job = await createMigrationJob(sourceAccountId, targetAccountId, excludedFolders ?? undefined);
 
     // Fire and forget — progress is tracked in the DB and polled by the client
     runMigrationJob(job.id).catch((err) => {
@@ -120,15 +120,15 @@ router.post('/execute', (req: Request, res: Response) => {
 });
 
 // GET /api/migration/jobs - List recent migration jobs
-router.get('/jobs', (req: Request, res: Response) => {
+router.get('/jobs', async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
-  res.json(listMigrationJobs(limit));
+  res.json(await listMigrationJobs(limit));
 });
 
 // GET /api/migration/jobs/:id - Job status with per-folder progress and error log
-router.get('/jobs/:id', (req: Request, res: Response) => {
+router.get('/jobs/:id', async (req: Request, res: Response) => {
   const jobId = parseInt(String(req.params.id), 10);
-  const detail = Number.isFinite(jobId) ? getMigrationJobDetail(jobId) : undefined;
+  const detail = Number.isFinite(jobId) ? await getMigrationJobDetail(jobId) : undefined;
 
   if (!detail) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Migration job not found' });
@@ -139,9 +139,9 @@ router.get('/jobs/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/migration/jobs/:id/cancel - Request cancellation of a running job
-router.post('/jobs/:id/cancel', (req: Request, res: Response) => {
+router.post('/jobs/:id/cancel', async (req: Request, res: Response) => {
   const jobId = parseInt(String(req.params.id), 10);
-  const job = Number.isFinite(jobId) ? cancelMigrationJob(jobId) : undefined;
+  const job = Number.isFinite(jobId) ? await cancelMigrationJob(jobId) : undefined;
 
   if (!job) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Migration job not found' });

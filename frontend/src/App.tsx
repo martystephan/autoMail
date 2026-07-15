@@ -16,7 +16,11 @@ import OAuthCallbackPage from "./pages/OAuthCallbackPage";
 import LoginPage from "./pages/LoginPage";
 import RegisterPage from "./pages/RegisterPage";
 
-function ProtectedRoute({ children }: { children: React.ReactNode }) {
+// Single gate instead of per-route guards: exactly one of setup / login / app
+// is rendered based on auth state, so wrong combinations (login page while no
+// account exists, register page while one does) can't be reached via the URL.
+// The current location is untouched — after signing in you land where you were.
+function AuthGate({ children }: { children: React.ReactNode }) {
   const { user, isLoading, needsSetup } = useAuth();
 
   if (isLoading) {
@@ -28,54 +32,11 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
   }
 
   if (needsSetup) {
-    return <Navigate to="/register" replace />;
+    return <RegisterPage />;
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
-  }
-
-  return <>{children}</>;
-}
-
-function AuthRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading } = useAuth();
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-100">
-        <p className="text-neutral-500">Loading...</p>
-      </div>
-    );
-  }
-
-  if (user) {
-    return <Navigate to="/" replace />;
-  }
-
-  return <>{children}</>;
-}
-
-function RegisterRoute({ children }: { children: React.ReactNode }) {
-  const { user, isLoading, needsSetup } = useAuth();
-
-  if (isLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-neutral-100">
-        <p className="text-neutral-500">Loading...</p>
-      </div>
-    );
-  }
-
-  // Check for token in localStorage as backup - user state might not be set yet
-  const hasToken = !!localStorage.getItem("authToken");
-
-  if (user || hasToken) {
-    return <Navigate to="/" replace />;
-  }
-
-  if (!needsSetup) {
-    return <Navigate to="/login" replace />;
+    return <LoginPage />;
   }
 
   return <>{children}</>;
@@ -84,78 +45,52 @@ function RegisterRoute({ children }: { children: React.ReactNode }) {
 function AppRoutes() {
   return (
     <Routes>
-      {/* Auth routes */}
-      <Route
-        path="/login"
-        element={
-          <AuthRoute>
-            <LoginPage />
-          </AuthRoute>
-        }
-      />
-      <Route
-        path="/register"
-        element={
-          <RegisterRoute>
-            <RegisterPage />
-          </RegisterRoute>
-        }
-      />
-
       {/* OAuth callback without Layout wrapper */}
       <Route path="/oauth/callback" element={<OAuthCallbackPage />} />
 
-      {/* Protected routes with Layout */}
       <Route
         path="/"
         element={
-          <ProtectedRoute>
-            <Layout>
-              <MailAccountsPage />
-            </Layout>
-          </ProtectedRoute>
+          <Layout>
+            <MailAccountsPage />
+          </Layout>
         }
       />
       <Route
         path="/automation-flows"
         element={
-          <ProtectedRoute>
-            <Layout>
-              <AutomationFlowsPage />
-            </Layout>
-          </ProtectedRoute>
+          <Layout>
+            <AutomationFlowsPage />
+          </Layout>
         }
       />
       <Route
         path="/migration"
         element={
-          <ProtectedRoute>
-            <Layout>
-              <MigrationPage />
-            </Layout>
-          </ProtectedRoute>
+          <Layout>
+            <MigrationPage />
+          </Layout>
         }
       />
       <Route
         path="/archive"
         element={
-          <ProtectedRoute>
-            <Layout>
-              <ArchivePage />
-            </Layout>
-          </ProtectedRoute>
+          <Layout>
+            <ArchivePage />
+          </Layout>
         }
       />
       <Route
         path="/connection-test"
         element={
-          <ProtectedRoute>
-            <Layout>
-              <ConnectionTestPage />
-            </Layout>
-          </ProtectedRoute>
+          <Layout>
+            <ConnectionTestPage />
+          </Layout>
         }
       />
+      {/* Old auth URLs (bookmarks, the API client's 401 redirect target in
+          older builds) just go home — the gate decides what to show there */}
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
@@ -164,7 +99,9 @@ function App() {
   return (
     <Router>
       <AuthProvider>
-        <AppRoutes />
+        <AuthGate>
+          <AppRoutes />
+        </AuthGate>
         <Toaster position="bottom-center" richColors />
       </AuthProvider>
     </Router>

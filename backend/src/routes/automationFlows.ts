@@ -1,30 +1,25 @@
 import { Router, Request, Response } from 'express';
-import db, { AutomationFlow, MailAccount, FlowWithAccounts } from '../utils/db';
+import prisma from '../utils/prisma';
+import { FlowWithAccounts } from '../types/db';
 import { HTTP_STATUS, ERROR_MESSAGES } from '../constants';
+import { runAutomationFlow } from '../services/automation';
 
 const router = Router();
 
 // Helper to get flow with joined accounts
-function getFlowWithAccounts(flowId: number): FlowWithAccounts | undefined {
-  const flow = db.prepare('SELECT * FROM automation_flows WHERE id = ?').get(flowId) as AutomationFlow | undefined;
-  if (!flow) return undefined;
-
-  const sourceMailAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(flow.sourceMailAccountId) as MailAccount;
-  const targetMailAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(flow.targetMailAccountId) as MailAccount;
-
-  return { ...flow, sourceMailAccount, targetMailAccount };
+async function getFlowWithAccounts(flowId: number): Promise<FlowWithAccounts | null> {
+  return prisma.automationFlow.findUnique({
+    where: { id: flowId },
+    include: { sourceMailAccount: true, targetMailAccount: true },
+  });
 }
 
 // Get all automation flows
 router.get('/', async (req: Request, res: Response) => {
   try {
-    const flows = db.prepare('SELECT * FROM automation_flows ORDER BY createdAt DESC').all() as AutomationFlow[];
-
-    // Join with mail accounts
-    const flowsWithAccounts = flows.map((flow) => {
-      const sourceMailAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(flow.sourceMailAccountId) as MailAccount;
-      const targetMailAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(flow.targetMailAccountId) as MailAccount;
-      return { ...flow, sourceMailAccount, targetMailAccount };
+    const flowsWithAccounts = await prisma.automationFlow.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { sourceMailAccount: true, targetMailAccount: true },
     });
 
     res.status(HTTP_STATUS.OK).json(flowsWithAccounts);
@@ -38,7 +33,7 @@ router.get('/', async (req: Request, res: Response) => {
 router.get('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
-    const flow = getFlowWithAccounts(id);
+    const flow = await getFlowWithAccounts(id);
 
     if (!flow) {
       return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.FLOW_NOT_FOUND });
@@ -70,8 +65,14 @@ router.post('/', async (req: Request, res: Response) => {
     }
 
     // Verify accounts exist
-    const sourceAccount = db.prepare('SELECT id FROM mail_accounts WHERE id = ?').get(sourceMailAccountId);
-    const targetAccount = db.prepare('SELECT id FROM mail_accounts WHERE id = ?').get(targetMailAccountId);
+    const sourceAccount = await prisma.mailAccount.findUnique({
+      where: { id: sourceMailAccountId },
+      select: { id: true },
+    });
+    const targetAccount = await prisma.mailAccount.findUnique({
+      where: { id: targetMailAccountId },
+      select: { id: true },
+    });
 
     if (!sourceAccount || !targetAccount) {
       return res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Invalid account IDs' });
@@ -81,24 +82,20 @@ router.post('/', async (req: Request, res: Response) => {
     const now = new Date();
     const nextRun = new Date(now.getTime() + (intervalMinutes || 60) * 60000);
 
-    const stmt = db.prepare(`
-      INSERT INTO automation_flows (name, sourceMailAccountId, sourceMailbox, targetMailAccountId, targetMailbox, enabled, intervalMinutes, nextRun, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
-      name,
-      sourceMailAccountId,
-      sourceMailbox,
-      targetMailAccountId,
-      targetMailbox,
-      enabled !== undefined ? (enabled ? 1 : 0) : 1,
-      intervalMinutes || 60,
-      nextRun.toISOString(),
-      now.toISOString(),
-      now.toISOString()
-    );
+    const created = await prisma.automationFlow.create({
+      data: {
+        name,
+        sourceMailAccountId,
+        sourceMailbox,
+        targetMailAccountId,
+        targetMailbox,
+        enabled: enabled !== undefined ? enabled : true,
+        intervalMinutes: intervalMinutes || 60,
+        nextRun,
+      },
+    });
 
-    const flow = getFlowWithAccounts(result.lastInsertRowid as number);
+    const flow = await getFlowWithAccounts(created.id);
     res.status(HTTP_STATUS.CREATED).json(flow);
   } catch (error) {
     console.error('Error creating automation flow:', error);
@@ -120,46 +117,46 @@ router.put('/:id', async (req: Request, res: Response) => {
       intervalMinutes,
     } = req.body;
 
-    const existing = db.prepare('SELECT * FROM automation_flows WHERE id = ?').get(id) as AutomationFlow | undefined;
+    const existing = await prisma.automationFlow.findUnique({ where: { id } });
     if (!existing) {
       return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.FLOW_NOT_FOUND });
     }
 
-    // Verify accounts exist if changed
-    if (sourceMailAccountId !== existing.sourceMailAccountId) {
-      const sourceAccount = db.prepare('SELECT id FROM mail_accounts WHERE id = ?').get(sourceMailAccountId);
+    // Verify accounts exist if changed (undefined = field not part of the update)
+    if (sourceMailAccountId !== undefined && sourceMailAccountId !== existing.sourceMailAccountId) {
+      const sourceAccount = await prisma.mailAccount.findUnique({
+        where: { id: sourceMailAccountId },
+        select: { id: true },
+      });
       if (!sourceAccount) {
         return res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Invalid source account ID' });
       }
     }
 
-    if (targetMailAccountId !== existing.targetMailAccountId) {
-      const targetAccount = db.prepare('SELECT id FROM mail_accounts WHERE id = ?').get(targetMailAccountId);
+    if (targetMailAccountId !== undefined && targetMailAccountId !== existing.targetMailAccountId) {
+      const targetAccount = await prisma.mailAccount.findUnique({
+        where: { id: targetMailAccountId },
+        select: { id: true },
+      });
       if (!targetAccount) {
         return res.status(HTTP_STATUS.BAD_REQUEST).json({ error: 'Invalid target account ID' });
       }
     }
 
-    const now = new Date().toISOString();
+    await prisma.automationFlow.update({
+      where: { id },
+      data: {
+        name,
+        sourceMailAccountId,
+        sourceMailbox,
+        targetMailAccountId,
+        targetMailbox,
+        enabled: enabled !== undefined ? enabled : existing.enabled,
+        intervalMinutes: intervalMinutes || existing.intervalMinutes,
+      },
+    });
 
-    const stmt = db.prepare(`
-      UPDATE automation_flows
-      SET name = ?, sourceMailAccountId = ?, sourceMailbox = ?, targetMailAccountId = ?, targetMailbox = ?, enabled = ?, intervalMinutes = ?, updatedAt = ?
-      WHERE id = ?
-    `);
-    stmt.run(
-      name,
-      sourceMailAccountId,
-      sourceMailbox,
-      targetMailAccountId,
-      targetMailbox,
-      enabled !== undefined ? (enabled ? 1 : 0) : existing.enabled,
-      intervalMinutes || existing.intervalMinutes,
-      now,
-      id
-    );
-
-    const flow = getFlowWithAccounts(id);
+    const flow = await getFlowWithAccounts(id);
     res.status(HTTP_STATUS.OK).json(flow);
   } catch (error) {
     console.error('Error updating automation flow:', error);
@@ -172,12 +169,15 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
 
-    const existing = db.prepare('SELECT id FROM automation_flows WHERE id = ?').get(id);
+    const existing = await prisma.automationFlow.findUnique({
+      where: { id },
+      select: { id: true },
+    });
     if (!existing) {
       return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.FLOW_NOT_FOUND });
     }
 
-    db.prepare('DELETE FROM automation_flows WHERE id = ?').run(id);
+    await prisma.automationFlow.delete({ where: { id } });
 
     res.status(HTTP_STATUS.OK).json({ message: 'Flow deleted successfully' });
   } catch (error) {
@@ -190,14 +190,11 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/:id/run', async (req: Request, res: Response) => {
   try {
     const id = parseInt(req.params.id as string);
-    const flow = getFlowWithAccounts(id);
+    const flow = await getFlowWithAccounts(id);
 
     if (!flow) {
       return res.status(HTTP_STATUS.NOT_FOUND).json({ error: ERROR_MESSAGES.FLOW_NOT_FOUND });
     }
-
-    // Import automation service
-    const { runAutomationFlow } = await import('../services/automation');
 
     // Run the flow
     await runAutomationFlow(flow);

@@ -14,7 +14,7 @@ const router = Router();
 
 // POST /api/connection-test/execute - Upload credentials and start testing
 // them in the background. Passwords are only kept in memory for the run.
-router.post('/execute', (req: Request, res: Response) => {
+router.post('/execute', async (req: Request, res: Response) => {
   try {
     const { imapHost, imapPort, accounts } = req.body;
     const port = parseInt(String(imapPort), 10);
@@ -31,7 +31,7 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const activeRun = findActiveConnectionTestRun();
+    const activeRun = await findActiveConnectionTestRun();
     if (activeRun) {
       res.status(HTTP_STATUS.CONFLICT).json({
         error: `A connection test (#${activeRun.id}) is currently running`,
@@ -39,7 +39,7 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const run = createConnectionTestRun(imapHost.trim(), port, accounts);
+    const run = await createConnectionTestRun(imapHost.trim(), port, accounts);
 
     // Fire and forget — progress is tracked in the DB and polled by the client
     runConnectionTestRun(run.id).catch((err) => {
@@ -56,15 +56,15 @@ router.post('/execute', (req: Request, res: Response) => {
 });
 
 // GET /api/connection-test/runs - List recent connection test runs
-router.get('/runs', (req: Request, res: Response) => {
+router.get('/runs', async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
-  res.json(listConnectionTestRuns(limit));
+  res.json(await listConnectionTestRuns(limit));
 });
 
 // GET /api/connection-test/runs/:id - Run status with all per-row results
-router.get('/runs/:id', (req: Request, res: Response) => {
+router.get('/runs/:id', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const detail = Number.isFinite(runId) ? getConnectionTestRunDetail(runId) : undefined;
+  const detail = Number.isFinite(runId) ? await getConnectionTestRunDetail(runId) : undefined;
 
   if (!detail) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Connection test run not found' });
@@ -75,9 +75,9 @@ router.get('/runs/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/connection-test/runs/:id/cancel - Request cancellation of a running test
-router.post('/runs/:id/cancel', (req: Request, res: Response) => {
+router.post('/runs/:id/cancel', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const run = Number.isFinite(runId) ? cancelConnectionTestRun(runId) : undefined;
+  const run = Number.isFinite(runId) ? await cancelConnectionTestRun(runId) : undefined;
 
   if (!run) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Connection test run not found' });
@@ -88,10 +88,10 @@ router.post('/runs/:id/cancel', (req: Request, res: Response) => {
 });
 
 // DELETE /api/connection-test/runs/:id - Delete a finished run and its results
-router.delete('/runs/:id', (req: Request, res: Response) => {
+router.delete('/runs/:id', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.id), 10);
-    const deleted = Number.isFinite(runId) ? deleteConnectionTestRun(runId) : false;
+    const deleted = Number.isFinite(runId) ? await deleteConnectionTestRun(runId) : false;
 
     if (!deleted) {
       res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Connection test run not found' });

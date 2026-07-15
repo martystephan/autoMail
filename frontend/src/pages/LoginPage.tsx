@@ -1,23 +1,22 @@
 import { useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { useAuth } from "../context/AuthContext";
 import { Button, Input, Label } from "../components/ui";
 
 export default function LoginPage() {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
-  const navigate = useNavigate();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setLoading(true);
 
     try {
-      await login(username, password);
-      navigate("/");
+      // On success the session updates and the AuthGate swaps to the app,
+      // keeping the current URL — no navigation needed.
+      await login(email, password);
     } catch (err: any) {
       toast.error(err.message || "Login failed");
     } finally {
@@ -35,12 +34,12 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div>
-            <Label htmlFor="username">Username</Label>
+            <Label htmlFor="email">Email</Label>
             <Input
-              type="text"
-              id="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
+              type="email"
+              id="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
               required
               className="mt-1"
             />

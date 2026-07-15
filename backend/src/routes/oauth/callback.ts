@@ -1,5 +1,5 @@
 import { Request, Response, RequestHandler } from "express";
-import db from "../../utils/db";
+import prisma from "../../utils/prisma";
 import { HTTP_STATUS } from "../../constants";
 import { encryptPassword } from "../../utils/crypto";
 import { exchangeCodeForTokens, getUserInfo } from "../../services/tokenManager";
@@ -97,27 +97,22 @@ export const callbackHandler = (async (req: Request, res: Response) => {
     }
 
     // Create mail account
-    const now = new Date().toISOString();
-    const stmt = db.prepare(`
-      INSERT INTO mail_accounts (name, type, email, imapHost, imapPort, accessToken, refreshToken, tokenExpiry, createdAt, updatedAt)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-    const result = stmt.run(
-      userName || userEmail,
-      "microsoft",
-      userEmail,
-      providerConfig.imap.host,
-      providerConfig.imap.port,
-      encryptPassword(tokens.accessToken),
-      encryptPassword(tokens.refreshToken),
-      tokens.expiresAt.toISOString(),
-      now,
-      now
-    );
+    const account = await prisma.mailAccount.create({
+      data: {
+        name: userName || userEmail,
+        type: "microsoft",
+        email: userEmail,
+        imapHost: providerConfig.imap.host,
+        imapPort: providerConfig.imap.port,
+        accessToken: encryptPassword(tokens.accessToken),
+        refreshToken: encryptPassword(tokens.refreshToken),
+        tokenExpiry: tokens.expiresAt,
+      },
+    });
 
     // Redirect to frontend with success
     res.redirect(
-      `${frontendUrl}/oauth/callback?success=true&provider=${provider}&accountId=${result.lastInsertRowid}`
+      `${frontendUrl}/oauth/callback?success=true&provider=${provider}&accountId=${account.id}`
     );
   } catch (error) {
     console.error("Error in OAuth callback:", error);

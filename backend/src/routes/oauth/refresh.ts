@@ -1,5 +1,5 @@
 import { Request, Response, RequestHandler } from "express";
-import db, { MailAccount } from "../../utils/db";
+import prisma from "../../utils/prisma";
 import { HTTP_STATUS } from "../../constants";
 import { getValidAccessToken } from "../../services/tokenManager";
 import { isValidProvider } from "../../config/oauthProviders";
@@ -30,7 +30,10 @@ export const refreshHandler = (async (req: Request, res: Response) => {
     await getValidAccessToken(id);
 
     // Get updated account info
-    const mailAccount = db.prepare('SELECT id, tokenExpiry FROM mail_accounts WHERE id = ?').get(id) as Pick<MailAccount, 'id' | 'tokenExpiry'> | undefined;
+    const mailAccount = await prisma.mailAccount.findUnique({
+      where: { id },
+      select: { id: true, tokenExpiry: true },
+    });
 
     res.json({
       success: true,

@@ -1,4 +1,5 @@
-import db, { ConnectionTestResult, ConnectionTestRun, MigrationJobStatus } from '../utils/db';
+import prisma from '../utils/prisma';
+import { ConnectionTestResult, ConnectionTestRun, MigrationJobStatus } from '../types/db';
 import { withImapClient } from '../utils/imapClient';
 
 // How many IMAP logins are attempted at the same time
@@ -44,65 +45,67 @@ const runPasswords = new Map<number, Map<number, string>>();
 // Run persistence
 // ---------------------------------------------------------------------------
 
-export function getConnectionTestRun(runId: number): ConnectionTestRun | undefined {
-  return db.prepare('SELECT * FROM connection_test_runs WHERE id = ?').get(runId) as
-    | ConnectionTestRun
-    | undefined;
+export async function getConnectionTestRun(runId: number): Promise<ConnectionTestRun | undefined> {
+  return (await prisma.connectionTestRun.findUnique({ where: { id: runId } })) ?? undefined;
 }
 
-export function listConnectionTestRuns(limit = 20): ConnectionTestRun[] {
-  return db
-    .prepare('SELECT * FROM connection_test_runs ORDER BY id DESC LIMIT ?')
-    .all(limit) as ConnectionTestRun[];
+export async function listConnectionTestRuns(limit = 20): Promise<ConnectionTestRun[]> {
+  return prisma.connectionTestRun.findMany({ orderBy: { id: 'desc' }, take: limit });
 }
 
-export function findActiveConnectionTestRun(): ConnectionTestRun | undefined {
-  return db
-    .prepare("SELECT * FROM connection_test_runs WHERE status IN ('pending', 'running') ORDER BY id DESC LIMIT 1")
-    .get() as ConnectionTestRun | undefined;
+export async function findActiveConnectionTestRun(): Promise<ConnectionTestRun | undefined> {
+  return (
+    (await prisma.connectionTestRun.findFirst({
+      where: { status: { in: ACTIVE_RUN_STATUSES } },
+      orderBy: { id: 'desc' },
+    })) ?? undefined
+  );
 }
 
-export function getConnectionTestRunDetail(runId: number): ConnectionTestRunDetail | undefined {
-  const run = getConnectionTestRun(runId);
+export async function getConnectionTestRunDetail(
+  runId: number
+): Promise<ConnectionTestRunDetail | undefined> {
+  const run = await getConnectionTestRun(runId);
   if (!run) return undefined;
 
-  const results = db
-    .prepare('SELECT * FROM connection_test_results WHERE runId = ? ORDER BY id')
-    .all(runId) as ConnectionTestResult[];
+  const results = await prisma.connectionTestResult.findMany({
+    where: { runId },
+    orderBy: { id: 'asc' },
+  });
 
   return { run, results };
 }
 
-export function cancelConnectionTestRun(runId: number): ConnectionTestRun | undefined {
-  const run = getConnectionTestRun(runId);
+export async function cancelConnectionTestRun(runId: number): Promise<ConnectionTestRun | undefined> {
+  const run = await getConnectionTestRun(runId);
   if (!run) return undefined;
 
-  if (ACTIVE_RUN_STATUSES.includes(run.status)) {
+  if (ACTIVE_RUN_STATUSES.includes(run.status as MigrationJobStatus)) {
     runCancelRequests.add(runId);
   }
   return getConnectionTestRun(runId);
 }
 
 // Results go via ON DELETE CASCADE
-export function deleteConnectionTestRun(runId: number): boolean {
-  const run = getConnectionTestRun(runId);
+export async function deleteConnectionTestRun(runId: number): Promise<boolean> {
+  const run = await getConnectionTestRun(runId);
   if (!run) return false;
-  if (ACTIVE_RUN_STATUSES.includes(run.status)) {
+  if (ACTIVE_RUN_STATUSES.includes(run.status as MigrationJobStatus)) {
     throw new Error('This connection test is still running — cancel it before deleting');
   }
 
-  db.prepare('DELETE FROM connection_test_runs WHERE id = ?').run(runId);
+  await prisma.connectionTestRun.delete({ where: { id: runId } });
   return true;
 }
 
 // Validate the uploaded rows and create the run with one result row per
 // credential. Duplicates are NOT collapsed — every physical CSV row gets its
 // own test. The passwords stay in memory only.
-export function createConnectionTestRun(
+export async function createConnectionTestRun(
   imapHost: string,
   imapPort: number,
   rows: ConnectionTestRow[]
-): ConnectionTestRun {
+): Promise<ConnectionTestRun> {
   const validated: ConnectionTestRow[] = [];
 
   for (const [index, row] of rows.entries()) {
@@ -126,25 +129,25 @@ export function createConnectionTestRun(
     throw new Error('The upload contains no rows');
   }
 
-  const insertResult = db.prepare(
-    'INSERT INTO connection_test_results (runId, email, username) VALUES (?, ?, ?)'
+  const passwords = new Map<number, string>();
+  const runId = await prisma.$transaction(
+    async (tx) => {
+      const run = await tx.connectionTestRun.create({
+        data: { imapHost, imapPort, totalAccounts: validated.length },
+      });
+      for (const row of validated) {
+        const result = await tx.connectionTestResult.create({
+          data: { runId: run.id, email: row.email, username: row.username },
+        });
+        passwords.set(result.id, row.password);
+      }
+      return run.id;
+    },
+    { timeout: 30000 }
   );
 
-  const passwords = new Map<number, string>();
-  const runId = db.transaction(() => {
-    const info = db
-      .prepare('INSERT INTO connection_test_runs (imapHost, imapPort, totalAccounts) VALUES (?, ?, ?)')
-      .run(imapHost, imapPort, validated.length);
-    const id = Number(info.lastInsertRowid);
-    for (const row of validated) {
-      const resultInfo = insertResult.run(id, row.email, row.username);
-      passwords.set(Number(resultInfo.lastInsertRowid), row.password);
-    }
-    return id;
-  })();
-
   runPasswords.set(runId, passwords);
-  return getConnectionTestRun(runId)!;
+  return (await getConnectionTestRun(runId))!;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,7 +193,10 @@ async function testOneResult(
   result: ConnectionTestResult,
   password: string
 ): Promise<boolean> {
-  db.prepare("UPDATE connection_test_results SET status = 'running' WHERE id = ?").run(result.id);
+  await prisma.connectionTestResult.update({
+    where: { id: result.id },
+    data: { status: 'running' },
+  });
 
   let ok = false;
   let error: string | null = null;
@@ -212,38 +218,42 @@ async function testOneResult(
     logRun(run.id, 'warn', `${result.email}: ${error}`);
   }
 
-  db.prepare(
-    "UPDATE connection_test_results SET status = ?, error = ?, testedAt = datetime('now') WHERE id = ?"
-  ).run(ok ? 'ok' : 'failed', error, result.id);
-  db.prepare(
-    `UPDATE connection_test_runs
-     SET processedAccounts = processedAccounts + 1,
-         okAccounts = okAccounts + ?,
-         failedAccounts = failedAccounts + ?
-     WHERE id = ?`
-  ).run(ok ? 1 : 0, ok ? 0 : 1, run.id);
+  await prisma.connectionTestResult.update({
+    where: { id: result.id },
+    data: { status: ok ? 'ok' : 'failed', error, testedAt: new Date() },
+  });
+  await prisma.connectionTestRun.update({
+    where: { id: run.id },
+    data: {
+      processedAccounts: { increment: 1 },
+      okAccounts: { increment: ok ? 1 : 0 },
+      failedAccounts: { increment: ok ? 0 : 1 },
+    },
+  });
   return ok;
 }
 
 // Test all rows of a run in small parallel batches. Fire and forget — the
 // client polls the run in the DB.
 export async function runConnectionTestRun(runId: number): Promise<void> {
-  const run = getConnectionTestRun(runId);
+  const run = await getConnectionTestRun(runId);
   if (!run) return;
 
   try {
-    db.prepare("UPDATE connection_test_runs SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(
-      runId
-    );
+    await prisma.connectionTestRun.update({
+      where: { id: runId },
+      data: { status: 'running', startedAt: new Date() },
+    });
 
     const passwords = runPasswords.get(runId);
     if (!passwords) {
       throw new Error('The credentials for this run are no longer in memory — upload the CSV again');
     }
 
-    const results = db
-      .prepare("SELECT * FROM connection_test_results WHERE runId = ? AND status = 'pending' ORDER BY id")
-      .all(runId) as ConnectionTestResult[];
+    const results = await prisma.connectionTestResult.findMany({
+      where: { runId, status: 'pending' },
+      orderBy: { id: 'asc' },
+    });
     logRun(
       runId,
       'info',
@@ -259,11 +269,12 @@ export async function runConnectionTestRun(runId: number): Promise<void> {
       await Promise.all(batch.map((result) => testOneResult(run, result, passwords.get(result.id) ?? '')));
     }
 
-    const finished = getConnectionTestRun(runId)!;
+    const finished = (await getConnectionTestRun(runId))!;
     const finalStatus: MigrationJobStatus = finished.failedAccounts > 0 ? 'completed_with_errors' : 'completed';
-    db.prepare(
-      "UPDATE connection_test_runs SET status = ?, completedAt = datetime('now') WHERE id = ?"
-    ).run(finalStatus, runId);
+    await prisma.connectionTestRun.update({
+      where: { id: runId },
+      data: { status: finalStatus, completedAt: new Date() },
+    });
     logRun(
       runId,
       finalStatus === 'completed' ? 'info' : 'warn',
@@ -271,18 +282,21 @@ export async function runConnectionTestRun(runId: number): Promise<void> {
     );
   } catch (err) {
     if (err instanceof ConnectionTestRunCancelledError) {
-      db.prepare(
-        "UPDATE connection_test_results SET status = 'cancelled' WHERE runId = ? AND status IN ('pending', 'running')"
-      ).run(runId);
-      db.prepare(
-        "UPDATE connection_test_runs SET status = 'cancelled', completedAt = datetime('now') WHERE id = ?"
-      ).run(runId);
+      await prisma.connectionTestResult.updateMany({
+        where: { runId, status: { in: ['pending', 'running'] } },
+        data: { status: 'cancelled' },
+      });
+      await prisma.connectionTestRun.update({
+        where: { id: runId },
+        data: { status: 'cancelled', completedAt: new Date() },
+      });
       logRun(runId, 'warn', 'Connection test cancelled — rows tested before the cancellation keep their result.');
     } else {
       const message = err instanceof Error ? err.message : String(err);
-      db.prepare(
-        "UPDATE connection_test_runs SET status = 'failed', error = ?, completedAt = datetime('now') WHERE id = ?"
-      ).run(message, runId);
+      await prisma.connectionTestRun.update({
+        where: { id: runId },
+        data: { status: 'failed', error: message, completedAt: new Date() },
+      });
       logRun(runId, 'error', `Connection test failed: ${message}`);
     }
   } finally {
@@ -293,26 +307,23 @@ export async function runConnectionTestRun(runId: number): Promise<void> {
 
 // Called once on server startup: runs still marked active belong to a
 // previous process, and their passwords died with it — they cannot resume.
-export function recoverInterruptedConnectionTestRuns(): void {
-  const resultChanges = db
-    .prepare(
-      `UPDATE connection_test_results
-       SET status = 'interrupted'
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  const runChanges = db
-    .prepare(
-      `UPDATE connection_test_runs
-       SET status = 'interrupted',
-           error = 'Server restarted while the connection test was running. Upload the CSV again to test the remaining rows.',
-           completedAt = datetime('now')
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  if (runChanges.changes > 0) {
+export async function recoverInterruptedConnectionTestRuns(): Promise<void> {
+  const resultChanges = await prisma.connectionTestResult.updateMany({
+    where: { status: { in: ['pending', 'running'] } },
+    data: { status: 'interrupted' },
+  });
+  const runChanges = await prisma.connectionTestRun.updateMany({
+    where: { status: { in: ['pending', 'running'] } },
+    data: {
+      status: 'interrupted',
+      error:
+        'Server restarted while the connection test was running. Upload the CSV again to test the remaining rows.',
+      completedAt: new Date(),
+    },
+  });
+  if (runChanges.count > 0) {
     console.warn(
-      `Marked ${runChanges.changes} connection test run(s) (${resultChanges.changes} row(s)) as interrupted after restart`
+      `Marked ${runChanges.count} connection test run(s) (${resultChanges.count} row(s)) as interrupted after restart`
     );
   }
 }

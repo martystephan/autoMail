@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { BulkRole } from '../utils/db';
+import { BulkRole } from '../types/db';
 import { findActiveMigrationJob } from '../services/migration';
 import {
   deleteBulkSession,
@@ -24,16 +24,16 @@ function parseRole(value: string): BulkRole | undefined {
 
 // Imports and deletes are blocked while anything is migrating so credentials
 // don't change under a running job
-function activeMigrationError(): string | undefined {
-  const activeJob = findActiveMigrationJob();
+async function activeMigrationError(): Promise<string | undefined> {
+  const activeJob = await findActiveMigrationJob();
   if (activeJob) return `A migration (job #${activeJob.id}) is currently running`;
-  const activeRun = findActiveBulkRun();
+  const activeRun = await findActiveBulkRun();
   if (activeRun) return `A bulk migration (run #${activeRun.id}) is currently running`;
   return undefined;
 }
 
 // PUT /api/migration/bulk/accounts/:role - Replace the imported accounts of one role
-router.put('/accounts/:role', (req: Request, res: Response) => {
+router.put('/accounts/:role', async (req: Request, res: Response) => {
   try {
     const role = parseRole(String(req.params.role));
     if (!role) {
@@ -56,13 +56,13 @@ router.put('/accounts/:role', (req: Request, res: Response) => {
       return;
     }
 
-    const conflict = activeMigrationError();
+    const conflict = await activeMigrationError();
     if (conflict) {
       res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
       return;
     }
 
-    const result = replaceBulkAccounts(role, imapHost.trim(), port, accounts);
+    const result = await replaceBulkAccounts(role, imapHost.trim(), port, accounts);
     res.json(result);
   } catch (error: any) {
     // Validation errors from the service (bad email, empty password, ...)
@@ -73,37 +73,37 @@ router.put('/accounts/:role', (req: Request, res: Response) => {
 });
 
 // GET /api/migration/bulk/accounts - Both imports plus the email matching
-router.get('/accounts', (_req: Request, res: Response) => {
-  res.json(getBulkOverview());
+router.get('/accounts', async (_req: Request, res: Response) => {
+  res.json(await getBulkOverview());
 });
 
 // DELETE /api/migration/bulk/accounts/:role - Clear one imported table
-router.delete('/accounts/:role', (req: Request, res: Response) => {
+router.delete('/accounts/:role', async (req: Request, res: Response) => {
   const role = parseRole(String(req.params.role));
   if (!role) {
     res.status(HTTP_STATUS.BAD_REQUEST).json({ error: "Role must be 'source' or 'target'" });
     return;
   }
 
-  const conflict = activeMigrationError();
+  const conflict = await activeMigrationError();
   if (conflict) {
     res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
     return;
   }
 
-  res.json({ deleted: deleteBulkAccounts(role) });
+  res.json({ deleted: await deleteBulkAccounts(role) });
 });
 
 // DELETE /api/migration/bulk/session - Remove the whole migration project
 // (imported accounts, runs, and job history)
-router.delete('/session', (_req: Request, res: Response) => {
-  const conflict = activeMigrationError();
+router.delete('/session', async (_req: Request, res: Response) => {
+  const conflict = await activeMigrationError();
   if (conflict) {
     res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
     return;
   }
 
-  deleteBulkSession();
+  await deleteBulkSession();
   res.json({ ok: true });
 });
 
@@ -119,15 +119,15 @@ router.post('/accounts/:role/test', async (req: Request, res: Response) => {
 });
 
 // POST /api/migration/bulk/execute - Start a bulk run (runs in the background)
-router.post('/execute', (req: Request, res: Response) => {
+router.post('/execute', async (req: Request, res: Response) => {
   try {
-    const conflict = activeMigrationError();
+    const conflict = await activeMigrationError();
     if (conflict) {
       res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
       return;
     }
 
-    const overview = getBulkOverview();
+    const overview = await getBulkOverview();
     if (overview.pairs.length === 0) {
       res.status(HTTP_STATUS.BAD_REQUEST).json({
         error: 'No matched account pairs — import source and target accounts with matching email addresses first',
@@ -152,7 +152,7 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const run = createBulkRun(overview.pairs.length);
+    const run = await createBulkRun(overview.pairs.length);
 
     // Fire and forget — progress is tracked in the DB and polled by the client
     runBulkMigration(run.id, {
@@ -172,15 +172,15 @@ router.post('/execute', (req: Request, res: Response) => {
 });
 
 // GET /api/migration/bulk/runs - List recent bulk runs
-router.get('/runs', (req: Request, res: Response) => {
+router.get('/runs', async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
-  res.json(listBulkRuns(limit));
+  res.json(await listBulkRuns(limit));
 });
 
 // GET /api/migration/bulk/runs/:id - Run status with per-pair jobs and current job detail
-router.get('/runs/:id', (req: Request, res: Response) => {
+router.get('/runs/:id', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const detail = Number.isFinite(runId) ? getBulkRunDetail(runId) : undefined;
+  const detail = Number.isFinite(runId) ? await getBulkRunDetail(runId) : undefined;
 
   if (!detail) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Bulk migration run not found' });
@@ -191,9 +191,9 @@ router.get('/runs/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/migration/bulk/runs/:id/cancel - Request cancellation of a running bulk run
-router.post('/runs/:id/cancel', (req: Request, res: Response) => {
+router.post('/runs/:id/cancel', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const run = Number.isFinite(runId) ? cancelBulkRun(runId) : undefined;
+  const run = Number.isFinite(runId) ? await cancelBulkRun(runId) : undefined;
 
   if (!run) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Bulk migration run not found' });

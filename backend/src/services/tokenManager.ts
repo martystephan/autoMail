@@ -1,5 +1,5 @@
 import { getProvider } from "../config/oauthProviders";
-import db, { MailAccount } from "../utils/db";
+import prisma from "../utils/prisma";
 import { encryptPassword, decryptPassword } from "../utils/crypto";
 
 interface TokenResponse {
@@ -157,7 +157,7 @@ export async function refreshAccessToken(
 /**
  * Check if token is expired (with 5-minute buffer)
  */
-export function isTokenExpired(tokenExpiresAt: string | null): boolean {
+export function isTokenExpired(tokenExpiresAt: Date | string | null): boolean {
   if (!tokenExpiresAt) return true;
   const bufferMs = 5 * 60 * 1000; // 5 minutes
   return new Date(tokenExpiresAt).getTime() - bufferMs < Date.now();
@@ -167,7 +167,7 @@ export function isTokenExpired(tokenExpiresAt: string | null): boolean {
  * Get a valid access token for a mail account, refreshing if necessary
  */
 export async function getValidAccessToken(mailAccountId: number): Promise<string> {
-  const account = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(mailAccountId) as MailAccount | undefined;
+  const account = await prisma.mailAccount.findUnique({ where: { id: mailAccountId } });
 
   if (!account) {
     throw new Error("Mail account not found");
@@ -191,18 +191,14 @@ export async function getValidAccessToken(mailAccountId: number): Promise<string
   const newTokens = await refreshAccessToken("microsoft", decryptedRefreshToken);
 
   // Update the account with new tokens
-  const now = new Date().toISOString();
-  db.prepare(`
-    UPDATE mail_accounts
-    SET accessToken = ?, refreshToken = ?, tokenExpiry = ?, updatedAt = ?
-    WHERE id = ?
-  `).run(
-    encryptPassword(newTokens.accessToken),
-    encryptPassword(newTokens.refreshToken),
-    newTokens.expiresAt.toISOString(),
-    now,
-    mailAccountId
-  );
+  await prisma.mailAccount.update({
+    where: { id: mailAccountId },
+    data: {
+      accessToken: encryptPassword(newTokens.accessToken),
+      refreshToken: encryptPassword(newTokens.refreshToken),
+      tokenExpiry: newTokens.expiresAt,
+    },
+  });
 
   return newTokens.accessToken;
 }

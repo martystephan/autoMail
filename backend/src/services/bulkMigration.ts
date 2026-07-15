@@ -1,4 +1,5 @@
-import db, { BulkAccount, BulkRole, BulkRun, MigrationJob, MigrationJobStatus } from '../utils/db';
+import prisma from '../utils/prisma';
+import { BulkRole, BulkRun, MigrationJob, MigrationJobStatus } from '../types/db';
 import { encryptPassword, decryptPassword } from '../utils/crypto';
 import { withImapClient } from '../utils/imapClient';
 import {
@@ -32,8 +33,8 @@ export interface BulkAccountView {
   username: string;
   imapHost: string;
   imapPort: number;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface BulkPair {
@@ -88,23 +89,33 @@ const connectionTested: Record<BulkRole, boolean> = { source: false, target: fal
 // Account import / overview
 // ---------------------------------------------------------------------------
 
-const VIEW_COLUMNS = 'id, role, email, targetEmail, username, imapHost, imapPort, createdAt, updatedAt';
-
-function listBulkAccountViews(role: BulkRole): BulkAccountView[] {
-  return db
-    .prepare(`SELECT ${VIEW_COLUMNS} FROM bulk_accounts WHERE role = ? ORDER BY email`)
-    .all(role) as BulkAccountView[];
+async function listBulkAccountViews(role: BulkRole): Promise<BulkAccountView[]> {
+  return (await prisma.bulkAccount.findMany({
+    where: { role },
+    orderBy: { email: 'asc' },
+    select: {
+      id: true,
+      role: true,
+      email: true,
+      targetEmail: true,
+      username: true,
+      imapHost: true,
+      imapPort: true,
+      createdAt: true,
+      updatedAt: true,
+    },
+  })) as BulkAccountView[];
 }
 
 // Replace the imported accounts for one role: upsert by (role, email), rows
 // missing from the new import are removed. The CSVs stay the source of truth —
 // this table is just the working copy the runs connect with.
-export function replaceBulkAccounts(
+export async function replaceBulkAccounts(
   role: BulkRole,
   imapHost: string,
   imapPort: number,
   rows: BulkImportRow[]
-): BulkImportResult {
+): Promise<BulkImportResult> {
   const warnings: string[] = [];
   const byEmail = new Map<string, { username: string; password: string; targetEmail: string | null }>();
 
@@ -139,68 +150,86 @@ export function replaceBulkAccounts(
     throw new Error('The import contains no rows');
   }
 
-  const upsert = db.prepare(
-    `INSERT INTO bulk_accounts (role, email, targetEmail, username, password, imapHost, imapPort)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(role, email) DO UPDATE SET
-       targetEmail = excluded.targetEmail,
-       username = excluded.username,
-       password = excluded.password,
-       imapHost = excluded.imapHost,
-       imapPort = excluded.imapPort,
-       updatedAt = datetime('now')`
+  await prisma.$transaction(
+    async (tx) => {
+      for (const [email, row] of byEmail) {
+        const password = encryptPassword(row.password);
+        await tx.bulkAccount.upsert({
+          where: { role_email: { role, email } },
+          create: {
+            role,
+            email,
+            targetEmail: row.targetEmail,
+            username: row.username,
+            password,
+            imapHost,
+            imapPort,
+          },
+          update: {
+            targetEmail: row.targetEmail,
+            username: row.username,
+            password,
+            imapHost,
+            imapPort,
+          },
+        });
+      }
+      await tx.bulkAccount.deleteMany({
+        where: { role, email: { notIn: [...byEmail.keys()] } },
+      });
+    },
+    { timeout: 30000 }
   );
 
-  db.transaction(() => {
-    for (const [email, row] of byEmail) {
-      upsert.run(role, email, row.targetEmail, row.username, encryptPassword(row.password), imapHost, imapPort);
-    }
-    const placeholders = Array.from(byEmail.keys(), () => '?').join(', ');
-    db.prepare(`DELETE FROM bulk_accounts WHERE role = ? AND email NOT IN (${placeholders})`).run(
-      role,
-      ...byEmail.keys()
-    );
-  })();
-
   connectionTested[role] = false;
-  return { accounts: listBulkAccountViews(role), warnings };
+  return { accounts: await listBulkAccountViews(role), warnings };
 }
 
-export function deleteBulkAccounts(role: BulkRole): number {
+export async function deleteBulkAccounts(role: BulkRole): Promise<number> {
   connectionTested[role] = false;
-  return db.prepare('DELETE FROM bulk_accounts WHERE role = ?').run(role).changes;
+  return (await prisma.bulkAccount.deleteMany({ where: { role } })).count;
 }
 
 // The whole migration project disappears: imports, runs, and job history
 // (pair jobs, their folders and logs go via ON DELETE CASCADE)
-export function deleteBulkSession(): void {
-  db.transaction(() => {
-    db.prepare("DELETE FROM migration_jobs WHERE mode = 'bulk'").run();
-    db.prepare('DELETE FROM bulk_runs').run();
-    db.prepare('DELETE FROM bulk_accounts').run();
-  })();
+export async function deleteBulkSession(): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.migrationJob.deleteMany({ where: { mode: 'bulk' } });
+      await tx.bulkRun.deleteMany();
+      await tx.bulkAccount.deleteMany();
+    },
+    { timeout: 30000 }
+  );
   connectionTested.source = false;
   connectionTested.target = false;
 }
 
 // A source row matches the target row whose email equals the source's target
 // column, falling back to the source's own email when no target is given
-function getMatchedPairs(): BulkPair[] {
-  return db
-    .prepare(
-      `SELECT s.email AS sourceEmail, t.email AS targetEmail, s.id AS sourceId, t.id AS targetId
-       FROM bulk_accounts s
-       JOIN bulk_accounts t ON t.role = 'target' AND t.email = COALESCE(s.targetEmail, s.email)
-       WHERE s.role = 'source'
-       ORDER BY s.email`
-    )
-    .all() as BulkPair[];
+async function getMatchedPairs(): Promise<BulkPair[]> {
+  const sources = await prisma.bulkAccount.findMany({ where: { role: 'source' }, orderBy: { email: 'asc' } });
+  const targets = await prisma.bulkAccount.findMany({ where: { role: 'target' } });
+  const targetByEmail = new Map(targets.map((target) => [target.email, target]));
+
+  const pairs: BulkPair[] = [];
+  for (const source of sources) {
+    const target = targetByEmail.get(source.targetEmail ?? source.email);
+    if (!target) continue;
+    pairs.push({
+      sourceEmail: source.email,
+      targetEmail: target.email,
+      sourceId: source.id,
+      targetId: target.id,
+    });
+  }
+  return pairs;
 }
 
-export function getBulkOverview(): BulkOverview {
-  const source = listBulkAccountViews('source');
-  const target = listBulkAccountViews('target');
-  const pairs = getMatchedPairs();
+export async function getBulkOverview(): Promise<BulkOverview> {
+  const source = await listBulkAccountViews('source');
+  const target = await listBulkAccountViews('target');
+  const pairs = await getMatchedPairs();
   const matchedSourceIds = new Set(pairs.map((pair) => pair.sourceId));
   const matchedTargetIds = new Set(pairs.map((pair) => pair.targetId));
 
@@ -217,11 +246,11 @@ export function getBulkOverview(): BulkOverview {
 // Quick credential check against one imported row (all rows of a role share
 // host/port, so one successful login validates the server settings)
 export async function testBulkConnection(role: BulkRole, email?: string): Promise<{ ok: boolean; error?: string }> {
-  const row = (
-    email
-      ? db.prepare('SELECT * FROM bulk_accounts WHERE role = ? AND email = ?').get(role, email.trim().toLowerCase())
-      : db.prepare('SELECT * FROM bulk_accounts WHERE role = ? ORDER BY email LIMIT 1').get(role)
-  ) as BulkAccount | undefined;
+  const row = email
+    ? await prisma.bulkAccount.findUnique({
+        where: { role_email: { role, email: email.trim().toLowerCase() } },
+      })
+    : await prisma.bulkAccount.findFirst({ where: { role }, orderBy: { email: 'asc' } });
 
   if (!row) {
     return { ok: false, error: email ? `No imported ${role} account with email ${email}` : `No ${role} accounts imported` };
@@ -249,45 +278,47 @@ export async function testBulkConnection(role: BulkRole, email?: string): Promis
 // Run persistence
 // ---------------------------------------------------------------------------
 
-export function getBulkRun(runId: number): BulkRun | undefined {
-  return db.prepare('SELECT * FROM bulk_runs WHERE id = ?').get(runId) as BulkRun | undefined;
+export async function getBulkRun(runId: number): Promise<BulkRun | undefined> {
+  return (await prisma.bulkRun.findUnique({ where: { id: runId } })) ?? undefined;
 }
 
-export function listBulkRuns(limit = 20): BulkRun[] {
-  return db.prepare('SELECT * FROM bulk_runs ORDER BY id DESC LIMIT ?').all(limit) as BulkRun[];
+export async function listBulkRuns(limit = 20): Promise<BulkRun[]> {
+  return prisma.bulkRun.findMany({ orderBy: { id: 'desc' }, take: limit });
 }
 
-export function findActiveBulkRun(): BulkRun | undefined {
-  return db
-    .prepare("SELECT * FROM bulk_runs WHERE status IN ('pending', 'running') ORDER BY id DESC LIMIT 1")
-    .get() as BulkRun | undefined;
+export async function findActiveBulkRun(): Promise<BulkRun | undefined> {
+  return (
+    (await prisma.bulkRun.findFirst({
+      where: { status: { in: ['pending', 'running'] } },
+      orderBy: { id: 'desc' },
+    })) ?? undefined
+  );
 }
 
-export function getBulkRunDetail(runId: number): BulkRunDetail | undefined {
-  const run = getBulkRun(runId);
+export async function getBulkRunDetail(runId: number): Promise<BulkRunDetail | undefined> {
+  const run = await getBulkRun(runId);
   if (!run) return undefined;
 
-  const jobs = listMigrationJobsByBulkRun(runId);
-  const currentJobDetail = run.currentJobId ? getMigrationJobDetail(run.currentJobId) ?? null : null;
+  const jobs = await listMigrationJobsByBulkRun(runId);
+  const currentJobDetail = run.currentJobId ? (await getMigrationJobDetail(run.currentJobId)) ?? null : null;
 
   return { run, jobs, currentJobDetail };
 }
 
-export function createBulkRun(totalPairs: number): BulkRun {
-  const info = db.prepare('INSERT INTO bulk_runs (totalPairs) VALUES (?)').run(totalPairs);
-  return getBulkRun(Number(info.lastInsertRowid))!;
+export async function createBulkRun(totalPairs: number): Promise<BulkRun> {
+  return prisma.bulkRun.create({ data: { totalPairs } });
 }
 
-export function cancelBulkRun(runId: number): BulkRun | undefined {
-  const run = getBulkRun(runId);
+export async function cancelBulkRun(runId: number): Promise<BulkRun | undefined> {
+  const run = await getBulkRun(runId);
   if (!run) return undefined;
 
-  if (ACTIVE_RUN_STATUSES.includes(run.status)) {
+  if (ACTIVE_RUN_STATUSES.includes(run.status as MigrationJobStatus)) {
     bulkCancelRequests.add(runId);
     if (run.currentJobId) {
-      const currentJob = getMigrationJob(run.currentJobId);
-      if (currentJob && ACTIVE_JOB_STATUSES.includes(currentJob.status)) {
-        cancelMigrationJob(run.currentJobId);
+      const currentJob = await getMigrationJob(run.currentJobId);
+      if (currentJob && ACTIVE_JOB_STATUSES.includes(currentJob.status as MigrationJobStatus)) {
+        await cancelMigrationJob(run.currentJobId);
       }
     }
   }
@@ -314,7 +345,7 @@ function logRun(runId: number, level: 'info' | 'warn' | 'error', message: string
 // run starts fresh: nothing from previous runs is consulted — the recorded
 // data is purely a status board for the user.
 export async function runBulkMigration(runId: number, options: BulkRunOptions = {}): Promise<void> {
-  const run = getBulkRun(runId);
+  const run = await getBulkRun(runId);
   if (!run) return;
 
   const excludedFolders = [
@@ -323,10 +354,13 @@ export async function runBulkMigration(runId: number, options: BulkRunOptions = 
   ];
 
   try {
-    db.prepare("UPDATE bulk_runs SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(runId);
+    await prisma.bulkRun.update({
+      where: { id: runId },
+      data: { status: 'running', startedAt: new Date() },
+    });
 
-    const pairs = getMatchedPairs();
-    db.prepare('UPDATE bulk_runs SET totalPairs = ? WHERE id = ?').run(pairs.length, runId);
+    const pairs = await getMatchedPairs();
+    await prisma.bulkRun.update({ where: { id: runId }, data: { totalPairs: pairs.length } });
     logRun(runId, 'info', `Starting bulk migration with ${pairs.length} account pair(s)`);
 
     let completedPairs = 0;
@@ -341,12 +375,8 @@ export async function runBulkMigration(runId: number, options: BulkRunOptions = 
       const pairLabel =
         pair.sourceEmail === pair.targetEmail ? pair.sourceEmail : `${pair.sourceEmail} → ${pair.targetEmail}`;
 
-      const sourceRow = db.prepare('SELECT * FROM bulk_accounts WHERE id = ?').get(pair.sourceId) as
-        | BulkAccount
-        | undefined;
-      const targetRow = db.prepare('SELECT * FROM bulk_accounts WHERE id = ?').get(pair.targetId) as
-        | BulkAccount
-        | undefined;
+      const sourceRow = await prisma.bulkAccount.findUnique({ where: { id: pair.sourceId } });
+      const targetRow = await prisma.bulkAccount.findUnique({ where: { id: pair.targetId } });
       if (!sourceRow || !targetRow) {
         failedPairs++;
         completedPairs++;
@@ -366,18 +396,17 @@ export async function runBulkMigration(runId: number, options: BulkRunOptions = 
         continue;
       }
 
-      const job = createBulkPairJob(runId, sourceRow, targetRow, excludedFolders);
-      db.prepare('UPDATE bulk_runs SET currentJobId = ?, currentEmail = ? WHERE id = ?').run(
-        job.id,
-        pairLabel,
-        runId
-      );
+      const job = await createBulkPairJob(runId, sourceRow, targetRow, excludedFolders);
+      await prisma.bulkRun.update({
+        where: { id: runId },
+        data: { currentJobId: job.id, currentEmail: pairLabel },
+      });
       logRun(runId, 'info', `Pair ${completedPairs + 1}/${pairs.length}: migrating ${pairLabel} (job #${job.id})`);
 
       // Never rejects — per-pair problems end up as the job's status
       await runMigrationJob(job.id);
 
-      const finished = getMigrationJob(job.id);
+      const finished = await getMigrationJob(job.id);
       completedPairs++;
       if (finished?.status === 'failed') {
         failedPairs++;
@@ -385,26 +414,25 @@ export async function runBulkMigration(runId: number, options: BulkRunOptions = 
         pairsWithErrors++;
       } else if (finished?.status === 'cancelled') {
         // The pair was cancelled via the run — surface it as a run cancellation
-        db.prepare('UPDATE bulk_runs SET completedPairs = ?, failedPairs = ? WHERE id = ?').run(
-          completedPairs,
-          failedPairs,
-          runId
-        );
+        await prisma.bulkRun.update({
+          where: { id: runId },
+          data: { completedPairs, failedPairs },
+        });
         throw new BulkRunCancelledError();
       }
 
-      db.prepare('UPDATE bulk_runs SET completedPairs = ?, failedPairs = ? WHERE id = ?').run(
-        completedPairs,
-        failedPairs,
-        runId
-      );
+      await prisma.bulkRun.update({
+        where: { id: runId },
+        data: { completedPairs, failedPairs },
+      });
     }
 
     const finalStatus: MigrationJobStatus =
       failedPairs > 0 || pairsWithErrors > 0 ? 'completed_with_errors' : 'completed';
-    db.prepare(
-      "UPDATE bulk_runs SET status = ?, currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-    ).run(finalStatus, runId);
+    await prisma.bulkRun.update({
+      where: { id: runId },
+      data: { status: finalStatus, currentJobId: null, currentEmail: null, completedAt: new Date() },
+    });
     logRun(
       runId,
       finalStatus === 'completed' ? 'info' : 'warn',
@@ -412,15 +440,17 @@ export async function runBulkMigration(runId: number, options: BulkRunOptions = 
     );
   } catch (err) {
     if (err instanceof BulkRunCancelledError) {
-      db.prepare(
-        "UPDATE bulk_runs SET status = 'cancelled', currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(runId);
+      await prisma.bulkRun.update({
+        where: { id: runId },
+        data: { status: 'cancelled', currentJobId: null, currentEmail: null, completedAt: new Date() },
+      });
       logRun(runId, 'warn', 'Bulk migration cancelled. Start it again to resume — messages that already exist on the target will be skipped.');
     } else {
       const message = err instanceof Error ? err.message : String(err);
-      db.prepare(
-        "UPDATE bulk_runs SET status = 'failed', error = ?, currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(message, runId);
+      await prisma.bulkRun.update({
+        where: { id: runId },
+        data: { status: 'failed', error: message, currentJobId: null, currentEmail: null, completedAt: new Date() },
+      });
       logRun(runId, 'error', `Bulk migration failed: ${message}`);
     }
   } finally {

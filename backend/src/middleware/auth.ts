@@ -1,26 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
-import { JWT_SECRET } from '../routes/auth';
+import { fromNodeHeaders } from 'better-auth/node';
+import { auth } from '../lib/auth';
 
-export interface AuthRequest extends Request {
-  userId?: number;
-}
-
-export function requireAuth(req: AuthRequest, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authentication required' });
-    return;
-  }
-
-  const token = authHeader.substring(7);
-
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
-    req.userId = decoded.userId;
+    const session = await auth.api.getSession({ headers: fromNodeHeaders(req.headers) });
+    if (!session) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
     next();
   } catch (error) {
-    res.status(401).json({ error: 'Invalid or expired token' });
+    res.status(401).json({ error: 'Authentication required' });
   }
 }

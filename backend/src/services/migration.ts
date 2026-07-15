@@ -1,11 +1,12 @@
-import db, {
+import prisma from '../utils/prisma';
+import {
   MailAccount,
   BulkAccount,
   MigrationJob,
   MigrationFolder,
   MigrationLog,
   MigrationJobStatus,
-} from '../utils/db';
+} from '../types/db';
 import { withImapClient, buildImapClient, safeCloseImapClient, ImapCredentials } from '../utils/imapClient';
 import { decryptPassword } from '../utils/crypto';
 import { getValidAccessToken } from './tokenManager';
@@ -105,26 +106,26 @@ export function endpointFromBulkAccount(account: BulkAccount): MigrationEndpoint
 }
 
 // Load the source/target endpoints for a job, branching on its mode
-function resolveEndpoints(job: MigrationJob): { source: MigrationEndpoint; target: MigrationEndpoint } {
+async function resolveEndpoints(job: MigrationJob): Promise<{ source: MigrationEndpoint; target: MigrationEndpoint }> {
   if (job.mode === 'bulk') {
-    const sourceRow = db.prepare('SELECT * FROM bulk_accounts WHERE id = ?').get(job.sourceBulkAccountId) as
-      | BulkAccount
-      | undefined;
-    const targetRow = db.prepare('SELECT * FROM bulk_accounts WHERE id = ?').get(job.targetBulkAccountId) as
-      | BulkAccount
-      | undefined;
+    const sourceRow = job.sourceBulkAccountId
+      ? await prisma.bulkAccount.findUnique({ where: { id: job.sourceBulkAccountId } })
+      : null;
+    const targetRow = job.targetBulkAccountId
+      ? await prisma.bulkAccount.findUnique({ where: { id: job.targetBulkAccountId } })
+      : null;
     if (!sourceRow || !targetRow) {
       throw new Error('Source or target account no longer exists');
     }
     return { source: endpointFromBulkAccount(sourceRow), target: endpointFromBulkAccount(targetRow) };
   }
 
-  const sourceAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(job.sourceAccountId) as
-    | MailAccount
-    | undefined;
-  const targetAccount = db.prepare('SELECT * FROM mail_accounts WHERE id = ?').get(job.targetAccountId) as
-    | MailAccount
-    | undefined;
+  const sourceAccount = job.sourceAccountId
+    ? await prisma.mailAccount.findUnique({ where: { id: job.sourceAccountId } })
+    : null;
+  const targetAccount = job.targetAccountId
+    ? await prisma.mailAccount.findUnique({ where: { id: job.targetAccountId } })
+    : null;
   if (!sourceAccount || !targetAccount) {
     throw new Error('Source or target account no longer exists');
   }
@@ -425,20 +426,16 @@ export async function getMigrationPreview(
 // Job persistence helpers
 // ---------------------------------------------------------------------------
 
-function logJob(
+async function logJob(
   jobId: number,
   level: 'info' | 'warn' | 'error',
   message: string,
   folderPath?: string,
   uid?: number
-): void {
-  db.prepare('INSERT INTO migration_logs (jobId, level, folderPath, uid, message) VALUES (?, ?, ?, ?, ?)').run(
-    jobId,
-    level,
-    folderPath ?? null,
-    uid ?? null,
-    message
-  );
+): Promise<void> {
+  await prisma.migrationLog.create({
+    data: { jobId, level, folderPath: folderPath ?? null, uid: uid ?? null, message },
+  });
   const prefix = `[migration:${jobId}]${folderPath ? ` [${folderPath}]` : ''}`;
   if (level === 'error') {
     console.error(`${prefix} ${message}`);
@@ -449,76 +446,85 @@ function logJob(
   }
 }
 
-export function getMigrationJob(jobId: number): MigrationJob | undefined {
-  return db.prepare('SELECT * FROM migration_jobs WHERE id = ?').get(jobId) as MigrationJob | undefined;
+export async function getMigrationJob(jobId: number): Promise<MigrationJob | undefined> {
+  return (await prisma.migrationJob.findUnique({ where: { id: jobId } })) ?? undefined;
 }
 
-export function getMigrationJobDetail(jobId: number): MigrationJobDetail | undefined {
-  const job = getMigrationJob(jobId);
+export async function getMigrationJobDetail(jobId: number): Promise<MigrationJobDetail | undefined> {
+  const job = await getMigrationJob(jobId);
   if (!job) return undefined;
 
-  const folders = db
-    .prepare('SELECT * FROM migration_folders WHERE jobId = ? ORDER BY path')
-    .all(jobId) as MigrationFolder[];
-  const logs = db
-    .prepare("SELECT * FROM migration_logs WHERE jobId = ? AND level IN ('warn', 'error') ORDER BY id DESC LIMIT 200")
-    .all(jobId) as MigrationLog[];
+  const folders = await prisma.migrationFolder.findMany({ where: { jobId }, orderBy: { path: 'asc' } });
+  const logs = await prisma.migrationLog.findMany({
+    where: { jobId, level: { in: ['warn', 'error'] } },
+    orderBy: { id: 'desc' },
+    take: 200,
+  });
 
   return { job, folders, logs };
 }
 
-export function listMigrationJobs(limit = 20): MigrationJob[] {
-  return db.prepare('SELECT * FROM migration_jobs ORDER BY id DESC LIMIT ?').all(limit) as MigrationJob[];
+export async function listMigrationJobs(limit = 20): Promise<MigrationJob[]> {
+  return prisma.migrationJob.findMany({ orderBy: { id: 'desc' }, take: limit });
 }
 
-export function listMigrationJobsByBulkRun(runId: number): MigrationJob[] {
-  return db.prepare('SELECT * FROM migration_jobs WHERE bulkRunId = ? ORDER BY id').all(runId) as MigrationJob[];
+export async function listMigrationJobsByBulkRun(runId: number): Promise<MigrationJob[]> {
+  return prisma.migrationJob.findMany({ where: { bulkRunId: runId }, orderBy: { id: 'asc' } });
 }
 
-export function findActiveMigrationJob(): MigrationJob | undefined {
-  return db
-    .prepare("SELECT * FROM migration_jobs WHERE status IN ('pending', 'running') ORDER BY id DESC LIMIT 1")
-    .get() as MigrationJob | undefined;
+export async function findActiveMigrationJob(): Promise<MigrationJob | undefined> {
+  return (
+    (await prisma.migrationJob.findFirst({
+      where: { status: { in: ACTIVE_JOB_STATUSES } },
+      orderBy: { id: 'desc' },
+    })) ?? undefined
+  );
 }
 
-export function createMigrationJob(
+export async function createMigrationJob(
   sourceAccountId: number,
   targetAccountId: number,
   excludedFolders?: string[]
-): MigrationJob {
-  const info = db
-    .prepare('INSERT INTO migration_jobs (sourceAccountId, targetAccountId, excludedFolders) VALUES (?, ?, ?)')
-    .run(sourceAccountId, targetAccountId, JSON.stringify(excludedFolders ?? null));
-  return getMigrationJob(Number(info.lastInsertRowid))!;
+): Promise<MigrationJob> {
+  return prisma.migrationJob.create({
+    data: {
+      sourceAccountId,
+      targetAccountId,
+      excludedFolders: JSON.stringify(excludedFolders ?? null),
+    },
+  });
 }
 
 // Bulk pair exclusions are built-in folder groups (trash/junk), so they are
 // matched by name like the defaults — unlike user-picked paths in single mode
-export function createBulkPairJob(
+export async function createBulkPairJob(
   runId: number,
   sourceRow: BulkAccount,
   targetRow: BulkAccount,
   excludedFolders: string[]
-): MigrationJob {
+): Promise<MigrationJob> {
   const bulkEmail =
     sourceRow.email === targetRow.email ? sourceRow.email : `${sourceRow.email} → ${targetRow.email}`;
-  const info = db
-    .prepare(
-      `INSERT INTO migration_jobs (mode, bulkRunId, sourceBulkAccountId, targetBulkAccountId, bulkEmail, excludedFolders)
-       VALUES ('bulk', ?, ?, ?, ?, ?)`
-    )
-    .run(runId, sourceRow.id, targetRow.id, bulkEmail, JSON.stringify(excludedFolders));
-  return getMigrationJob(Number(info.lastInsertRowid))!;
+  return prisma.migrationJob.create({
+    data: {
+      mode: 'bulk',
+      bulkRunId: runId,
+      sourceBulkAccountId: sourceRow.id,
+      targetBulkAccountId: targetRow.id,
+      bulkEmail,
+      excludedFolders: JSON.stringify(excludedFolders),
+    },
+  });
 }
 
 // Request cancellation of a job. Running jobs stop at the next batch checkpoint.
-export function cancelMigrationJob(jobId: number): MigrationJob | undefined {
-  const job = getMigrationJob(jobId);
+export async function cancelMigrationJob(jobId: number): Promise<MigrationJob | undefined> {
+  const job = await getMigrationJob(jobId);
   if (!job) return undefined;
 
-  if (ACTIVE_JOB_STATUSES.includes(job.status)) {
+  if (ACTIVE_JOB_STATUSES.includes(job.status as MigrationJobStatus)) {
     cancelRequests.add(jobId);
-    logJob(jobId, 'info', 'Cancellation requested — job will stop at the next checkpoint');
+    await logJob(jobId, 'info', 'Cancellation requested — job will stop at the next checkpoint');
   }
   return getMigrationJob(jobId);
 }
@@ -527,34 +533,34 @@ export function cancelMigrationJob(jobId: number): MigrationJob | undefined {
 // a previous process and are no longer running. The stored records are pure
 // history — re-running is always safe because messages that already exist on
 // the target are skipped.
-export function recoverInterruptedJobs(): void {
-  const result = db
-    .prepare(
-      `UPDATE migration_jobs
-       SET status = 'interrupted',
-           error = 'Server restarted while the migration was running. Start it again — messages that already exist on the target will be skipped.',
-           completedAt = datetime('now'),
-           currentFolder = NULL
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  if (result.changes > 0) {
-    console.warn(`Marked ${result.changes} migration job(s) as interrupted after restart`);
+export async function recoverInterruptedJobs(): Promise<void> {
+  const result = await prisma.migrationJob.updateMany({
+    where: { status: { in: ACTIVE_JOB_STATUSES } },
+    data: {
+      status: 'interrupted',
+      error:
+        'Server restarted while the migration was running. Start it again — messages that already exist on the target will be skipped.',
+      completedAt: new Date(),
+      currentFolder: null,
+    },
+  });
+  if (result.count > 0) {
+    console.warn(`Marked ${result.count} migration job(s) as interrupted after restart`);
   }
 
-  const bulkResult = db
-    .prepare(
-      `UPDATE bulk_runs
-       SET status = 'interrupted',
-           error = 'Server restarted while the bulk migration was running. Start it again — messages that already exist on the target will be skipped.',
-           completedAt = datetime('now'),
-           currentJobId = NULL,
-           currentEmail = NULL
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  if (bulkResult.changes > 0) {
-    console.warn(`Marked ${bulkResult.changes} bulk migration run(s) as interrupted after restart`);
+  const bulkResult = await prisma.bulkRun.updateMany({
+    where: { status: { in: ACTIVE_JOB_STATUSES } },
+    data: {
+      status: 'interrupted',
+      error:
+        'Server restarted while the bulk migration was running. Start it again — messages that already exist on the target will be skipped.',
+      completedAt: new Date(),
+      currentJobId: null,
+      currentEmail: null,
+    },
+  });
+  if (bulkResult.count > 0) {
+    console.warn(`Marked ${bulkResult.count} bulk migration run(s) as interrupted after restart`);
   }
 }
 
@@ -562,15 +568,23 @@ export function recoverInterruptedJobs(): void {
 // Job execution
 // ---------------------------------------------------------------------------
 
-const stmtBumpJobCounters = () =>
-  db.prepare(
-    `UPDATE migration_jobs
-     SET copiedMessages = copiedMessages + ?,
-         skippedMessages = skippedMessages + ?,
-         failedMessages = failedMessages + ?,
-         processedMessages = processedMessages + ?
-     WHERE id = ?`
-  );
+async function bumpJobCounters(
+  jobId: number,
+  copied: number,
+  skipped: number,
+  failed: number,
+  processed: number
+): Promise<void> {
+  await prisma.migrationJob.update({
+    where: { id: jobId },
+    data: {
+      copiedMessages: { increment: copied },
+      skippedMessages: { increment: skipped },
+      failedMessages: { increment: failed },
+      processedMessages: { increment: processed },
+    },
+  });
+}
 
 function checkCancelled(jobId: number): void {
   if (cancelRequests.has(jobId)) {
@@ -623,10 +637,11 @@ async function migrateFolder(
   const source = buildImapClient(sourceCredentials);
   const target = buildImapClient(targetCredentials);
 
-  const updateFolderCounts = db.prepare(
-    'UPDATE migration_folders SET messageCount = ?, copiedCount = ?, skippedCount = ?, failedCount = ? WHERE id = ?'
-  );
-  const bumpJob = stmtBumpJobCounters();
+  const updateFolderCounts = (messageCount: number, copied: number, skipped: number, failed: number) =>
+    prisma.migrationFolder.update({
+      where: { id: folder.id },
+      data: { messageCount, copiedCount: copied, skippedCount: skipped, failedCount: failed },
+    });
 
   try {
     await source.connect();
@@ -661,12 +676,12 @@ async function migrateFolder(
     let copied = 0;
     let failed = 0;
 
-    updateFolderCounts.run(uids.length, copied, skipped, failed, folder.id);
+    await updateFolderCounts(uids.length, copied, skipped, failed);
     if (skipped > 0) {
-      bumpJob.run(0, skipped, 0, skipped, jobId);
-      logJob(jobId, 'info', `${skipped} of ${uids.length} messages already exist on the target — skipping them`, folder.path);
+      await bumpJobCounters(jobId, 0, skipped, 0, skipped);
+      await logJob(jobId, 'info', `${skipped} of ${uids.length} messages already exist on the target — skipping them`, folder.path);
     }
-    logJob(jobId, 'info', `Copying ${pendingUids.length} messages in batches of ${BATCH_SIZE}`, folder.path);
+    await logJob(jobId, 'info', `Copying ${pendingUids.length} messages in batches of ${BATCH_SIZE}`, folder.path);
 
     for (let offset = 0; offset < pendingUids.length; offset += BATCH_SIZE) {
       checkCancelled(jobId);
@@ -693,7 +708,7 @@ async function migrateFolder(
 
           if (!message || !message.source) {
             batchFailed++;
-            logJob(jobId, 'error', `Message UID ${uid} could not be fetched (no content returned)`, folder.path, uid);
+            await logJob(jobId, 'error', `Message UID ${uid} could not be fetched (no content returned)`, folder.path, uid);
             continue;
           }
 
@@ -705,7 +720,7 @@ async function migrateFolder(
           batchCopied++;
         } catch (err) {
           batchFailed++;
-          logJob(jobId, 'error', `Failed to copy message UID ${uid}: ${errorMessage(err)}`, folder.path, uid);
+          await logJob(jobId, 'error', `Failed to copy message UID ${uid}: ${errorMessage(err)}`, folder.path, uid);
         }
       }
 
@@ -714,8 +729,8 @@ async function migrateFolder(
       failed += batchFailed;
 
       // Checkpoint: persist progress after every batch
-      updateFolderCounts.run(uids.length, copied, skipped, failed, folder.id);
-      bumpJob.run(batchCopied, batchSkipped, batchFailed, batchCopied + batchSkipped + batchFailed, jobId);
+      await updateFolderCounts(uids.length, copied, skipped, failed);
+      await bumpJobCounters(jobId, batchCopied, batchSkipped, batchFailed, batchCopied + batchSkipped + batchFailed);
 
       // If the very first batch failed completely, the folder itself is broken
       // (missing on target, no append permission, ...) — abort instead of
@@ -726,11 +741,11 @@ async function migrateFolder(
     }
 
     const status = failed > 0 ? 'completed_with_errors' : 'completed';
-    db.prepare("UPDATE migration_folders SET status = ?, completedAt = datetime('now') WHERE id = ?").run(
-      status,
-      folder.id
-    );
-    logJob(jobId, failed > 0 ? 'warn' : 'info', `Folder done: ${copied} copied, ${skipped} skipped, ${failed} failed`, folder.path);
+    await prisma.migrationFolder.update({
+      where: { id: folder.id },
+      data: { status, completedAt: new Date() },
+    });
+    await logJob(jobId, failed > 0 ? 'warn' : 'info', `Folder done: ${copied} copied, ${skipped} skipped, ${failed} failed`, folder.path);
   } finally {
     await safeCloseImapClient(source);
     await safeCloseImapClient(target);
@@ -741,15 +756,18 @@ async function migrateFolder(
 // per-message problems — those are logged and counted; only cancellation or a
 // systemic failure ends the job early.
 export async function runMigrationJob(jobId: number): Promise<void> {
-  const job = getMigrationJob(jobId);
+  const job = await getMigrationJob(jobId);
   if (!job) return;
 
   try {
-    db.prepare("UPDATE migration_jobs SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(jobId);
+    await prisma.migrationJob.update({
+      where: { id: jobId },
+      data: { status: 'running', startedAt: new Date() },
+    });
 
-    const { source: sourceEndpoint, target: targetEndpoint } = resolveEndpoints(job);
+    const { source: sourceEndpoint, target: targetEndpoint } = await resolveEndpoints(job);
 
-    logJob(jobId, 'info', `Starting migration: ${sourceEndpoint.email} -> ${targetEndpoint.email}`);
+    await logJob(jobId, 'info', `Starting migration: ${sourceEndpoint.email} -> ${targetEndpoint.email}`);
 
     // Step 1: list source folders
     const parsedExclusions = JSON.parse(job.excludedFolders) as string[] | null;
@@ -778,13 +796,10 @@ export async function runMigrationJob(jobId: number): Promise<void> {
     folders.sort((a, b) => a.path.localeCompare(b.path));
 
     const totalMessages = folders.reduce((sum, folder) => sum + folder.messageCount, 0);
-    logJob(jobId, 'info', `Found ${folders.length} folders with ${totalMessages} messages to migrate`);
+    await logJob(jobId, 'info', `Found ${folders.length} folders with ${totalMessages} messages to migrate`);
 
     // Step 2: create missing folders on the target (delimiter-translated)
     const targetCredentials = await targetEndpoint.getCredentials();
-    const insertFolder = db.prepare(
-      'INSERT INTO migration_folders (jobId, path, targetPath, status, messageCount, error) VALUES (?, ?, ?, ?, ?, ?)'
-    );
 
     checkCancelled(jobId);
     await withImapClient(targetCredentials, async (client) => {
@@ -804,42 +819,52 @@ export async function runMigrationJob(jobId: number): Promise<void> {
         let error: string | null = null;
 
         if (targetPath !== folder.path) {
-          logJob(jobId, 'info', `Mapped to target folder: ${targetPath}`, folder.path);
+          await logJob(jobId, 'info', `Mapped to target folder: ${targetPath}`, folder.path);
         }
 
         if (!existingPaths.has(targetPath)) {
           try {
             await client.mailboxCreate(segments);
             existingPaths.add(targetPath);
-            logJob(jobId, 'info', `Created folder on target: ${targetPath}`, folder.path);
+            await logJob(jobId, 'info', `Created folder on target: ${targetPath}`, folder.path);
           } catch (err) {
             error = `Could not create folder on target: ${errorMessage(err)}`;
-            logJob(jobId, 'error', error, folder.path);
+            await logJob(jobId, 'error', error, folder.path);
           }
         }
 
-        insertFolder.run(jobId, folder.path, targetPath, error ? 'failed' : 'pending', folder.messageCount, error);
+        await prisma.migrationFolder.create({
+          data: {
+            jobId,
+            path: folder.path,
+            targetPath,
+            status: error ? 'failed' : 'pending',
+            messageCount: folder.messageCount,
+            error,
+          },
+        });
       }
     });
 
-    db.prepare('UPDATE migration_jobs SET totalFolders = ?, totalMessages = ? WHERE id = ?').run(
-      folders.length,
-      totalMessages,
-      jobId
-    );
+    await prisma.migrationJob.update({
+      where: { id: jobId },
+      data: { totalFolders: folders.length, totalMessages },
+    });
 
     // Step 3: copy folder by folder, batch by batch
-    const folderRows = db
-      .prepare("SELECT * FROM migration_folders WHERE jobId = ? AND status = 'pending' ORDER BY path")
-      .all(jobId) as MigrationFolder[];
+    const folderRows = await prisma.migrationFolder.findMany({
+      where: { jobId, status: 'pending' },
+      orderBy: { path: 'asc' },
+    });
 
     let consecutiveFailures = 0;
     for (const folderRow of folderRows) {
       checkCancelled(jobId);
-      db.prepare("UPDATE migration_folders SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(
-        folderRow.id
-      );
-      db.prepare('UPDATE migration_jobs SET currentFolder = ? WHERE id = ?').run(folderRow.path, jobId);
+      await prisma.migrationFolder.update({
+        where: { id: folderRow.id },
+        data: { status: 'running', startedAt: new Date() },
+      });
+      await prisma.migrationJob.update({ where: { id: jobId }, data: { currentFolder: folderRow.path } });
 
       try {
         await migrateFolder(jobId, folderRow, sourceEndpoint, targetEndpoint);
@@ -848,10 +873,11 @@ export async function runMigrationJob(jobId: number): Promise<void> {
         if (err instanceof MigrationCancelledError) throw err;
 
         const message = errorMessage(err);
-        db.prepare(
-          "UPDATE migration_folders SET status = 'failed', error = ?, completedAt = datetime('now') WHERE id = ?"
-        ).run(message, folderRow.id);
-        logJob(jobId, 'error', `Folder failed: ${message}`, folderRow.path);
+        await prisma.migrationFolder.update({
+          where: { id: folderRow.id },
+          data: { status: 'failed', error: message, completedAt: new Date() },
+        });
+        await logJob(jobId, 'error', `Folder failed: ${message}`, folderRow.path);
 
         consecutiveFailures++;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FOLDER_FAILURES) {
@@ -863,37 +889,39 @@ export async function runMigrationJob(jobId: number): Promise<void> {
     }
 
     // Step 4: final status from what actually happened
-    const finalJob = getMigrationJob(jobId)!;
-    const failedFolders = db
-      .prepare("SELECT COUNT(*) AS count FROM migration_folders WHERE jobId = ? AND status = 'failed'")
-      .get(jobId) as { count: number };
-    const hasErrors = finalJob.failedMessages > 0 || failedFolders.count > 0;
+    const finalJob = (await getMigrationJob(jobId))!;
+    const failedFolders = await prisma.migrationFolder.count({ where: { jobId, status: 'failed' } });
+    const hasErrors = finalJob.failedMessages > 0 || failedFolders > 0;
     const finalStatus: MigrationJobStatus = hasErrors ? 'completed_with_errors' : 'completed';
 
-    db.prepare(
-      "UPDATE migration_jobs SET status = ?, currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-    ).run(finalStatus, jobId);
-    logJob(
+    await prisma.migrationJob.update({
+      where: { id: jobId },
+      data: { status: finalStatus, currentFolder: null, completedAt: new Date() },
+    });
+    await logJob(
       jobId,
       hasErrors ? 'warn' : 'info',
       `Migration finished: ${finalJob.copiedMessages} copied, ${finalJob.skippedMessages} skipped, ${finalJob.failedMessages} failed` +
-        (failedFolders.count > 0 ? `, ${failedFolders.count} folder(s) failed` : '')
+        (failedFolders > 0 ? `, ${failedFolders} folder(s) failed` : '')
     );
   } catch (err) {
     if (err instanceof MigrationCancelledError) {
-      db.prepare(
-        "UPDATE migration_jobs SET status = 'cancelled', currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(jobId);
-      db.prepare(
-        "UPDATE migration_folders SET status = 'pending', completedAt = NULL WHERE jobId = ? AND status = 'running'"
-      ).run(jobId);
-      logJob(jobId, 'warn', 'Migration cancelled. Start it again to resume — messages that already exist on the target will be skipped.');
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: { status: 'cancelled', currentFolder: null, completedAt: new Date() },
+      });
+      await prisma.migrationFolder.updateMany({
+        where: { jobId, status: 'running' },
+        data: { status: 'pending', completedAt: null },
+      });
+      await logJob(jobId, 'warn', 'Migration cancelled. Start it again to resume — messages that already exist on the target will be skipped.');
     } else {
       const message = errorMessage(err);
-      db.prepare(
-        "UPDATE migration_jobs SET status = 'failed', error = ?, currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(message, jobId);
-      logJob(jobId, 'error', `Migration failed: ${message}`);
+      await prisma.migrationJob.update({
+        where: { id: jobId },
+        data: { status: 'failed', error: message, currentFolder: null, completedAt: new Date() },
+      });
+      await logJob(jobId, 'error', `Migration failed: ${message}`);
     }
   } finally {
     cancelRequests.delete(jobId);

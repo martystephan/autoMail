@@ -2,14 +2,15 @@ import fs from 'fs';
 import fsp from 'fs/promises';
 import path from 'path';
 import { ZipArchive } from 'archiver';
-import db, {
+import prisma from '../utils/prisma';
+import {
   ArchiveAccount,
   ArchiveFolder,
   ArchiveJob,
   ArchiveLog,
   ArchiveRun,
   MigrationJobStatus,
-} from '../utils/db';
+} from '../types/db';
 import { encryptPassword, decryptPassword } from '../utils/crypto';
 import { withImapClient, buildImapClient, safeCloseImapClient, ImapCredentials } from '../utils/imapClient';
 import { getFolders, detectSourceHeadRoles, applyRoleExclusions } from './migration';
@@ -44,8 +45,8 @@ export interface ArchiveAccountView {
   username: string;
   imapHost: string;
   imapPort: number;
-  createdAt: string;
-  updatedAt: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 export interface ArchiveOverview {
@@ -101,20 +102,28 @@ let connectionTested = false;
 // Account import / overview
 // ---------------------------------------------------------------------------
 
-const VIEW_COLUMNS = 'id, email, username, imapHost, imapPort, createdAt, updatedAt';
+const VIEW_SELECT = {
+  id: true,
+  email: true,
+  username: true,
+  imapHost: true,
+  imapPort: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
-function listArchiveAccountViews(): ArchiveAccountView[] {
-  return db.prepare(`SELECT ${VIEW_COLUMNS} FROM archive_accounts ORDER BY email`).all() as ArchiveAccountView[];
+async function listArchiveAccountViews(): Promise<ArchiveAccountView[]> {
+  return prisma.archiveAccount.findMany({ select: VIEW_SELECT, orderBy: { email: 'asc' } });
 }
 
 // Replace the imported accounts: upsert by email, rows missing from the new
 // import are removed. The CSV stays the source of truth — this table is just
 // the working copy the runs connect with.
-export function replaceArchiveAccounts(
+export async function replaceArchiveAccounts(
   imapHost: string,
   imapPort: number,
   rows: ArchiveImportRow[]
-): ArchiveImportResult {
+): Promise<ArchiveImportResult> {
   const warnings: string[] = [];
   const byEmail = new Map<string, { username: string; password: string }>();
 
@@ -142,46 +151,40 @@ export function replaceArchiveAccounts(
     throw new Error('The import contains no rows');
   }
 
-  const upsert = db.prepare(
-    `INSERT INTO archive_accounts (email, username, password, imapHost, imapPort)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(email) DO UPDATE SET
-       username = excluded.username,
-       password = excluded.password,
-       imapHost = excluded.imapHost,
-       imapPort = excluded.imapPort,
-       updatedAt = datetime('now')`
+  await prisma.$transaction(
+    async (tx) => {
+      for (const [email, row] of byEmail) {
+        const password = encryptPassword(row.password);
+        await tx.archiveAccount.upsert({
+          where: { email },
+          update: { username: row.username, password, imapHost, imapPort },
+          create: { email, username: row.username, password, imapHost, imapPort },
+        });
+      }
+      await tx.archiveAccount.deleteMany({ where: { email: { notIn: [...byEmail.keys()] } } });
+    },
+    { timeout: 30000 }
   );
 
-  db.transaction(() => {
-    for (const [email, row] of byEmail) {
-      upsert.run(email, row.username, encryptPassword(row.password), imapHost, imapPort);
-    }
-    const placeholders = Array.from(byEmail.keys(), () => '?').join(', ');
-    db.prepare(`DELETE FROM archive_accounts WHERE email NOT IN (${placeholders})`).run(...byEmail.keys());
-  })();
-
   connectionTested = false;
-  return { accounts: listArchiveAccountViews(), warnings };
+  return { accounts: await listArchiveAccountViews(), warnings };
 }
 
-export function deleteArchiveAccounts(): number {
+export async function deleteArchiveAccounts(): Promise<number> {
   connectionTested = false;
-  return db.prepare('DELETE FROM archive_accounts').run().changes;
+  return (await prisma.archiveAccount.deleteMany({})).count;
 }
 
-export function getArchiveOverview(): ArchiveOverview {
-  return { accounts: listArchiveAccountViews(), tested: connectionTested };
+export async function getArchiveOverview(): Promise<ArchiveOverview> {
+  return { accounts: await listArchiveAccountViews(), tested: connectionTested };
 }
 
 // Quick credential check against one imported row (all rows share host/port,
 // so one successful login validates the server settings)
 export async function testArchiveConnection(email?: string): Promise<{ ok: boolean; error?: string }> {
-  const row = (
-    email
-      ? db.prepare('SELECT * FROM archive_accounts WHERE email = ?').get(email.trim().toLowerCase())
-      : db.prepare('SELECT * FROM archive_accounts ORDER BY email LIMIT 1').get()
-  ) as ArchiveAccount | undefined;
+  const row = email
+    ? await prisma.archiveAccount.findUnique({ where: { email: email.trim().toLowerCase() } })
+    : await prisma.archiveAccount.findFirst({ orderBy: { email: 'asc' } });
 
   if (!row) {
     return { ok: false, error: email ? `No imported account with email ${email}` : 'No accounts imported' };
@@ -209,73 +212,85 @@ export async function testArchiveConnection(email?: string): Promise<{ ok: boole
 // Run / job persistence
 // ---------------------------------------------------------------------------
 
-export function getArchiveRun(runId: number): ArchiveRun | undefined {
-  return db.prepare('SELECT * FROM archive_runs WHERE id = ?').get(runId) as ArchiveRun | undefined;
+export async function getArchiveRun(runId: number): Promise<ArchiveRun | undefined> {
+  return (await prisma.archiveRun.findUnique({ where: { id: runId } })) ?? undefined;
 }
 
-export function listArchiveRuns(limit = 20): ArchiveRun[] {
-  return db.prepare('SELECT * FROM archive_runs ORDER BY id DESC LIMIT ?').all(limit) as ArchiveRun[];
+export async function listArchiveRuns(limit = 20): Promise<ArchiveRun[]> {
+  return prisma.archiveRun.findMany({ orderBy: { id: 'desc' }, take: limit });
 }
 
-export function findActiveArchiveRun(): ArchiveRun | undefined {
-  return db
-    .prepare("SELECT * FROM archive_runs WHERE status IN ('pending', 'running') ORDER BY id DESC LIMIT 1")
-    .get() as ArchiveRun | undefined;
+export async function findActiveArchiveRun(): Promise<ArchiveRun | undefined> {
+  return (
+    (await prisma.archiveRun.findFirst({
+      where: { status: { in: ACTIVE_RUN_STATUSES } },
+      orderBy: { id: 'desc' },
+    })) ?? undefined
+  );
 }
 
-export function getArchiveJob(jobId: number): ArchiveJob | undefined {
-  return db.prepare('SELECT * FROM archive_jobs WHERE id = ?').get(jobId) as ArchiveJob | undefined;
+export async function getArchiveJob(jobId: number): Promise<ArchiveJob | undefined> {
+  return (await prisma.archiveJob.findUnique({ where: { id: jobId } })) ?? undefined;
 }
 
-export function getArchiveJobDetail(jobId: number): ArchiveJobDetail | undefined {
-  const job = getArchiveJob(jobId);
+export async function getArchiveJobDetail(jobId: number): Promise<ArchiveJobDetail | undefined> {
+  const job = await getArchiveJob(jobId);
   if (!job) return undefined;
 
-  const folders = db.prepare('SELECT * FROM archive_folders WHERE jobId = ? ORDER BY path').all(jobId) as ArchiveFolder[];
-  const logs = db
-    .prepare("SELECT * FROM archive_logs WHERE jobId = ? AND level IN ('warn', 'error') ORDER BY id DESC LIMIT 200")
-    .all(jobId) as ArchiveLog[];
+  const folders = await prisma.archiveFolder.findMany({ where: { jobId }, orderBy: { path: 'asc' } });
+  const logs = await prisma.archiveLog.findMany({
+    where: { jobId, level: { in: ['warn', 'error'] } },
+    orderBy: { id: 'desc' },
+    take: 200,
+  });
 
   return { job, folders, logs };
 }
 
-export function listArchiveJobsByRun(runId: number): ArchiveJob[] {
-  return db.prepare('SELECT * FROM archive_jobs WHERE runId = ? ORDER BY id').all(runId) as ArchiveJob[];
+export async function listArchiveJobsByRun(runId: number): Promise<ArchiveJob[]> {
+  return prisma.archiveJob.findMany({ where: { runId }, orderBy: { id: 'asc' } });
 }
 
-export function getArchiveRunDetail(runId: number): ArchiveRunDetail | undefined {
-  const run = getArchiveRun(runId);
+export async function getArchiveRunDetail(runId: number): Promise<ArchiveRunDetail | undefined> {
+  const run = await getArchiveRun(runId);
   if (!run) return undefined;
 
-  const jobs = listArchiveJobsByRun(runId);
-  const currentJobDetail = run.currentJobId ? getArchiveJobDetail(run.currentJobId) ?? null : null;
+  const jobs = await listArchiveJobsByRun(runId);
+  const currentJobDetail = run.currentJobId ? (await getArchiveJobDetail(run.currentJobId)) ?? null : null;
 
   return { run, jobs, currentJobDetail };
 }
 
-export function createArchiveRun(totalAccounts: number): ArchiveRun {
-  const info = db.prepare('INSERT INTO archive_runs (totalAccounts) VALUES (?)').run(totalAccounts);
-  return getArchiveRun(Number(info.lastInsertRowid))!;
+export async function createArchiveRun(totalAccounts: number): Promise<ArchiveRun> {
+  return prisma.archiveRun.create({ data: { totalAccounts } });
 }
 
-function createArchiveJob(runId: number, account: ArchiveAccount, excludedFolders: string[]): ArchiveJob {
-  const info = db
-    .prepare('INSERT INTO archive_jobs (runId, archiveAccountId, email, excludedFolders) VALUES (?, ?, ?, ?)')
-    .run(runId, account.id, account.email, JSON.stringify(excludedFolders));
-  return getArchiveJob(Number(info.lastInsertRowid))!;
+async function createArchiveJob(
+  runId: number,
+  account: ArchiveAccount,
+  excludedFolders: string[]
+): Promise<ArchiveJob> {
+  return prisma.archiveJob.create({
+    data: {
+      runId,
+      archiveAccountId: account.id,
+      email: account.email,
+      excludedFolders: JSON.stringify(excludedFolders),
+    },
+  });
 }
 
-export function cancelArchiveRun(runId: number): ArchiveRun | undefined {
-  const run = getArchiveRun(runId);
+export async function cancelArchiveRun(runId: number): Promise<ArchiveRun | undefined> {
+  const run = await getArchiveRun(runId);
   if (!run) return undefined;
 
-  if (ACTIVE_RUN_STATUSES.includes(run.status)) {
+  if (ACTIVE_RUN_STATUSES.includes(run.status as MigrationJobStatus)) {
     runCancelRequests.add(runId);
     if (run.currentJobId) {
-      const currentJob = getArchiveJob(run.currentJobId);
-      if (currentJob && ACTIVE_RUN_STATUSES.includes(currentJob.status)) {
+      const currentJob = await getArchiveJob(run.currentJobId);
+      if (currentJob && ACTIVE_RUN_STATUSES.includes(currentJob.status as MigrationJobStatus)) {
         jobCancelRequests.add(run.currentJobId);
-        logJob(run.currentJobId, 'info', 'Cancellation requested — job will stop at the next checkpoint');
+        await logJob(run.currentJobId, 'info', 'Cancellation requested — job will stop at the next checkpoint');
       }
     }
   }
@@ -284,62 +299,61 @@ export function cancelArchiveRun(runId: number): ArchiveRun | undefined {
 
 // Delete a finished run: its zips on disk plus all records (jobs, folders and
 // logs go via ON DELETE CASCADE)
-export function deleteArchiveRun(runId: number): boolean {
-  const run = getArchiveRun(runId);
+export async function deleteArchiveRun(runId: number): Promise<boolean> {
+  const run = await getArchiveRun(runId);
   if (!run) return false;
-  if (ACTIVE_RUN_STATUSES.includes(run.status)) {
+  if (ACTIVE_RUN_STATUSES.includes(run.status as MigrationJobStatus)) {
     throw new Error('This archive run is still active — cancel it before deleting');
   }
 
   fs.rmSync(path.join(ARCHIVE_DIR, `run-${runId}`), { recursive: true, force: true });
-  db.prepare('DELETE FROM archive_runs WHERE id = ?').run(runId);
+  await prisma.archiveRun.delete({ where: { id: runId } });
   return true;
 }
 
 // The whole archive project disappears: imports, runs, zips and job history
-export function deleteArchiveSession(): void {
-  const runs = db.prepare('SELECT id FROM archive_runs').all() as { id: number }[];
+export async function deleteArchiveSession(): Promise<void> {
+  const runs = await prisma.archiveRun.findMany({ select: { id: true } });
   for (const run of runs) {
     fs.rmSync(path.join(ARCHIVE_DIR, `run-${run.id}`), { recursive: true, force: true });
   }
-  db.transaction(() => {
-    db.prepare('DELETE FROM archive_runs').run();
-    db.prepare('DELETE FROM archive_accounts').run();
-  })();
+  await prisma.$transaction(async (tx) => {
+    await tx.archiveRun.deleteMany({});
+    await tx.archiveAccount.deleteMany({});
+  });
   connectionTested = false;
 }
 
 // Called once on server startup: jobs and runs still marked active belong to
 // a previous process and are no longer running. Zips of accounts that
 // finished before the crash are kept; the interrupted account has no zip.
-export function recoverInterruptedArchiveJobs(): void {
-  const result = db
-    .prepare(
-      `UPDATE archive_jobs
-       SET status = 'interrupted',
-           error = 'Server restarted while the account was being archived. Start a new run for this account.',
-           completedAt = datetime('now'),
-           currentFolder = NULL
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  if (result.changes > 0) {
-    console.warn(`Marked ${result.changes} archive job(s) as interrupted after restart`);
+export async function recoverInterruptedArchiveJobs(): Promise<void> {
+  const result = await prisma.archiveJob.updateMany({
+    where: { status: { in: ACTIVE_RUN_STATUSES } },
+    data: {
+      status: 'interrupted',
+      error: 'Server restarted while the account was being archived. Start a new run for this account.',
+      completedAt: new Date(),
+      currentFolder: null,
+    },
+  });
+  if (result.count > 0) {
+    console.warn(`Marked ${result.count} archive job(s) as interrupted after restart`);
   }
 
-  const runResult = db
-    .prepare(
-      `UPDATE archive_runs
-       SET status = 'interrupted',
-           error = 'Server restarted while the archive run was running. Zips created before the restart are still available.',
-           completedAt = datetime('now'),
-           currentJobId = NULL,
-           currentEmail = NULL
-       WHERE status IN ('pending', 'running')`
-    )
-    .run();
-  if (runResult.changes > 0) {
-    console.warn(`Marked ${runResult.changes} archive run(s) as interrupted after restart`);
+  const runResult = await prisma.archiveRun.updateMany({
+    where: { status: { in: ACTIVE_RUN_STATUSES } },
+    data: {
+      status: 'interrupted',
+      error:
+        'Server restarted while the archive run was running. Zips created before the restart are still available.',
+      completedAt: new Date(),
+      currentJobId: null,
+      currentEmail: null,
+    },
+  });
+  if (runResult.count > 0) {
+    console.warn(`Marked ${runResult.count} archive run(s) as interrupted after restart`);
   }
 }
 
@@ -393,20 +407,16 @@ function zipDirectory(srcDir: string, outFile: string): Promise<number> {
 // Job execution
 // ---------------------------------------------------------------------------
 
-function logJob(
+async function logJob(
   jobId: number,
   level: 'info' | 'warn' | 'error',
   message: string,
   folderPath?: string,
   uid?: number
-): void {
-  db.prepare('INSERT INTO archive_logs (jobId, level, folderPath, uid, message) VALUES (?, ?, ?, ?, ?)').run(
-    jobId,
-    level,
-    folderPath ?? null,
-    uid ?? null,
-    message
-  );
+): Promise<void> {
+  await prisma.archiveLog.create({
+    data: { jobId, level, folderPath: folderPath ?? null, uid: uid ?? null, message },
+  });
   const prefix = `[archive:${jobId}]${folderPath ? ` [${folderPath}]` : ''}`;
   if (level === 'error') {
     console.error(`${prefix} ${message}`);
@@ -433,14 +443,16 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-const stmtBumpJobCounters = () =>
-  db.prepare(
-    `UPDATE archive_jobs
-     SET savedMessages = savedMessages + ?,
-         failedMessages = failedMessages + ?,
-         processedMessages = processedMessages + ?
-     WHERE id = ?`
-  );
+async function bumpJobCounters(jobId: number, saved: number, failed: number, processed: number): Promise<void> {
+  await prisma.archiveJob.update({
+    where: { id: jobId },
+    data: {
+      savedMessages: { increment: saved },
+      failedMessages: { increment: failed },
+      processedMessages: { increment: processed },
+    },
+  });
+}
 
 // Save one folder in batches. The connection is opened fresh for the folder;
 // every message is fetched and written individually so at most one message is
@@ -453,10 +465,11 @@ async function archiveFolder(
 ): Promise<void> {
   const source = buildImapClient(credentials);
 
-  const updateFolderCounts = db.prepare(
-    'UPDATE archive_folders SET messageCount = ?, savedCount = ?, failedCount = ? WHERE id = ?'
-  );
-  const bumpJob = stmtBumpJobCounters();
+  const updateFolderCounts = (messageCount: number, saved: number, failed: number) =>
+    prisma.archiveFolder.update({
+      where: { id: folder.id },
+      data: { messageCount, savedCount: saved, failedCount: failed },
+    });
 
   await fsp.mkdir(folderDir, { recursive: true });
 
@@ -468,8 +481,8 @@ async function archiveFolder(
     let saved = 0;
     let failed = 0;
 
-    updateFolderCounts.run(uids.length, saved, failed, folder.id);
-    logJob(jobId, 'info', `Saving ${uids.length} messages in batches of ${BATCH_SIZE}`, folder.path);
+    await updateFolderCounts(uids.length, saved, failed);
+    await logJob(jobId, 'info', `Saving ${uids.length} messages in batches of ${BATCH_SIZE}`, folder.path);
 
     for (let offset = 0; offset < uids.length; offset += BATCH_SIZE) {
       checkCancelled(jobId);
@@ -487,7 +500,7 @@ async function archiveFolder(
 
           if (!message || !message.source) {
             batchFailed++;
-            logJob(jobId, 'error', `Message UID ${uid} could not be fetched (no content returned)`, folder.path, uid);
+            await logJob(jobId, 'error', `Message UID ${uid} could not be fetched (no content returned)`, folder.path, uid);
             continue;
           }
 
@@ -495,7 +508,7 @@ async function archiveFolder(
           batchSaved++;
         } catch (err) {
           batchFailed++;
-          logJob(jobId, 'error', `Failed to save message UID ${uid}: ${errorMessage(err)}`, folder.path, uid);
+          await logJob(jobId, 'error', `Failed to save message UID ${uid}: ${errorMessage(err)}`, folder.path, uid);
         }
       }
 
@@ -503,8 +516,8 @@ async function archiveFolder(
       failed += batchFailed;
 
       // Checkpoint: persist progress after every batch
-      updateFolderCounts.run(uids.length, saved, failed, folder.id);
-      bumpJob.run(batchSaved, batchFailed, batchSaved + batchFailed, jobId);
+      await updateFolderCounts(uids.length, saved, failed);
+      await bumpJobCounters(jobId, batchSaved, batchFailed, batchSaved + batchFailed);
 
       // If the very first batch failed completely, the folder itself is broken
       // (disk full, no read permission, ...) — abort instead of producing one
@@ -515,11 +528,11 @@ async function archiveFolder(
     }
 
     const status = failed > 0 ? 'completed_with_errors' : 'completed';
-    db.prepare("UPDATE archive_folders SET status = ?, completedAt = datetime('now') WHERE id = ?").run(
-      status,
-      folder.id
-    );
-    logJob(jobId, failed > 0 ? 'warn' : 'info', `Folder done: ${saved} saved, ${failed} failed`, folder.path);
+    await prisma.archiveFolder.update({
+      where: { id: folder.id },
+      data: { status, completedAt: new Date() },
+    });
+    await logJob(jobId, failed > 0 ? 'warn' : 'info', `Folder done: ${saved} saved, ${failed} failed`, folder.path);
   } finally {
     await safeCloseImapClient(source);
   }
@@ -529,7 +542,7 @@ async function archiveFolder(
 // problems — those are logged and counted; only cancellation or a systemic
 // failure ends the job early.
 async function runArchiveJob(jobId: number): Promise<void> {
-  const job = getArchiveJob(jobId);
+  const job = await getArchiveJob(jobId);
   if (!job) return;
 
   const accountSegment = sanitizeSegment(job.email);
@@ -539,11 +552,14 @@ async function runArchiveJob(jobId: number): Promise<void> {
   let zipRecorded = false;
 
   try {
-    db.prepare("UPDATE archive_jobs SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(jobId);
+    await prisma.archiveJob.update({
+      where: { id: jobId },
+      data: { status: 'running', startedAt: new Date() },
+    });
 
-    const account = db.prepare('SELECT * FROM archive_accounts WHERE id = ?').get(job.archiveAccountId) as
-      | ArchiveAccount
-      | undefined;
+    const account = job.archiveAccountId
+      ? await prisma.archiveAccount.findUnique({ where: { id: job.archiveAccountId } })
+      : null;
     if (!account) {
       throw new Error('Account no longer exists');
     }
@@ -554,7 +570,7 @@ async function runArchiveJob(jobId: number): Promise<void> {
       password: decryptPassword(account.password),
     };
 
-    logJob(jobId, 'info', `Starting archive of ${job.email}`);
+    await logJob(jobId, 'info', `Starting archive of ${job.email}`);
 
     // Step 1: list folders, applying the run's role exclusions. Like bulk
     // migration, skip-trash/skip-junk only excludes folders the server flags
@@ -568,39 +584,39 @@ async function runArchiveJob(jobId: number): Promise<void> {
     folders.sort((a, b) => a.path.localeCompare(b.path));
 
     const totalMessages = folders.reduce((sum, folder) => sum + folder.messageCount, 0);
-    logJob(jobId, 'info', `Found ${folders.length} folders with ${totalMessages} messages to archive`);
+    await logJob(jobId, 'info', `Found ${folders.length} folders with ${totalMessages} messages to archive`);
 
-    const insertFolder = db.prepare(
-      'INSERT INTO archive_folders (jobId, path, messageCount) VALUES (?, ?, ?)'
-    );
     const dirByPath = new Map<string, string>();
     for (const folder of folders) {
-      insertFolder.run(jobId, folder.path, folder.messageCount);
+      await prisma.archiveFolder.create({
+        data: { jobId, path: folder.path, messageCount: folder.messageCount },
+      });
       const segments = folder.path.split(folder.delimiter || '/').map(sanitizeSegment);
       dirByPath.set(folder.path, path.join(tmpDir, ...segments));
     }
-    db.prepare('UPDATE archive_jobs SET totalFolders = ?, totalMessages = ? WHERE id = ?').run(
-      folders.length,
-      totalMessages,
-      jobId
-    );
+    await prisma.archiveJob.update({
+      where: { id: jobId },
+      data: { totalFolders: folders.length, totalMessages },
+    });
 
     // Fresh temp directory for this account
     await fsp.rm(tmpDir, { recursive: true, force: true });
     await fsp.mkdir(tmpDir, { recursive: true });
 
     // Step 2: save folder by folder, batch by batch
-    const folderRows = db
-      .prepare("SELECT * FROM archive_folders WHERE jobId = ? AND status = 'pending' ORDER BY path")
-      .all(jobId) as ArchiveFolder[];
+    const folderRows = await prisma.archiveFolder.findMany({
+      where: { jobId, status: 'pending' },
+      orderBy: { path: 'asc' },
+    });
 
     let consecutiveFailures = 0;
     for (const folderRow of folderRows) {
       checkCancelled(jobId);
-      db.prepare("UPDATE archive_folders SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(
-        folderRow.id
-      );
-      db.prepare('UPDATE archive_jobs SET currentFolder = ? WHERE id = ?').run(folderRow.path, jobId);
+      await prisma.archiveFolder.update({
+        where: { id: folderRow.id },
+        data: { status: 'running', startedAt: new Date() },
+      });
+      await prisma.archiveJob.update({ where: { id: jobId }, data: { currentFolder: folderRow.path } });
 
       try {
         await archiveFolder(jobId, folderRow, dirByPath.get(folderRow.path)!, credentials);
@@ -609,10 +625,11 @@ async function runArchiveJob(jobId: number): Promise<void> {
         if (err instanceof ArchiveJobCancelledError) throw err;
 
         const message = errorMessage(err);
-        db.prepare(
-          "UPDATE archive_folders SET status = 'failed', error = ?, completedAt = datetime('now') WHERE id = ?"
-        ).run(message, folderRow.id);
-        logJob(jobId, 'error', `Folder failed: ${message}`, folderRow.path);
+        await prisma.archiveFolder.update({
+          where: { id: folderRow.id },
+          data: { status: 'failed', error: message, completedAt: new Date() },
+        });
+        await logJob(jobId, 'error', `Folder failed: ${message}`, folderRow.path);
 
         consecutiveFailures++;
         if (consecutiveFailures >= MAX_CONSECUTIVE_FOLDER_FAILURES) {
@@ -625,46 +642,48 @@ async function runArchiveJob(jobId: number): Promise<void> {
 
     // Step 3: zip the account and drop the temp files
     checkCancelled(jobId);
-    db.prepare('UPDATE archive_jobs SET currentFolder = ? WHERE id = ?').run('(creating zip)', jobId);
-    logJob(jobId, 'info', `Creating zip ${zipRelPath}`);
+    await prisma.archiveJob.update({ where: { id: jobId }, data: { currentFolder: '(creating zip)' } });
+    await logJob(jobId, 'info', `Creating zip ${zipRelPath}`);
     await fsp.mkdir(path.dirname(zipAbsPath), { recursive: true });
     const zipSize = await zipDirectory(tmpDir, zipAbsPath);
-    db.prepare('UPDATE archive_jobs SET zipPath = ?, zipSize = ? WHERE id = ?').run(zipRelPath, zipSize, jobId);
+    await prisma.archiveJob.update({ where: { id: jobId }, data: { zipPath: zipRelPath, zipSize } });
     zipRecorded = true;
 
     // Step 4: final status from what actually happened
-    const finalJob = getArchiveJob(jobId)!;
-    const failedFolders = db
-      .prepare("SELECT COUNT(*) AS count FROM archive_folders WHERE jobId = ? AND status = 'failed'")
-      .get(jobId) as { count: number };
-    const hasErrors = finalJob.failedMessages > 0 || failedFolders.count > 0;
+    const finalJob = (await getArchiveJob(jobId))!;
+    const failedFolders = await prisma.archiveFolder.count({ where: { jobId, status: 'failed' } });
+    const hasErrors = finalJob.failedMessages > 0 || failedFolders > 0;
     const finalStatus: MigrationJobStatus = hasErrors ? 'completed_with_errors' : 'completed';
 
-    db.prepare(
-      "UPDATE archive_jobs SET status = ?, currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-    ).run(finalStatus, jobId);
-    logJob(
+    await prisma.archiveJob.update({
+      where: { id: jobId },
+      data: { status: finalStatus, currentFolder: null, completedAt: new Date() },
+    });
+    await logJob(
       jobId,
       hasErrors ? 'warn' : 'info',
       `Archive finished: ${finalJob.savedMessages} saved, ${finalJob.failedMessages} failed` +
-        (failedFolders.count > 0 ? `, ${failedFolders.count} folder(s) failed` : '') +
+        (failedFolders > 0 ? `, ${failedFolders} folder(s) failed` : '') +
         ` — zip is ${zipSize} bytes`
     );
   } catch (err) {
     if (err instanceof ArchiveJobCancelledError) {
-      db.prepare(
-        "UPDATE archive_jobs SET status = 'cancelled', currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(jobId);
-      db.prepare(
-        "UPDATE archive_folders SET status = 'pending', completedAt = NULL WHERE jobId = ? AND status = 'running'"
-      ).run(jobId);
-      logJob(jobId, 'warn', 'Archiving cancelled — no zip was created for this account.');
+      await prisma.archiveJob.update({
+        where: { id: jobId },
+        data: { status: 'cancelled', currentFolder: null, completedAt: new Date() },
+      });
+      await prisma.archiveFolder.updateMany({
+        where: { jobId, status: 'running' },
+        data: { status: 'pending', completedAt: null },
+      });
+      await logJob(jobId, 'warn', 'Archiving cancelled — no zip was created for this account.');
     } else {
       const message = errorMessage(err);
-      db.prepare(
-        "UPDATE archive_jobs SET status = 'failed', error = ?, currentFolder = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(message, jobId);
-      logJob(jobId, 'error', `Archiving failed: ${message}`);
+      await prisma.archiveJob.update({
+        where: { id: jobId },
+        data: { status: 'failed', error: message, currentFolder: null, completedAt: new Date() },
+      });
+      await logJob(jobId, 'error', `Archiving failed: ${message}`);
     }
     // A partial zip from a failed/cancelled zipping step is useless
     if (!zipRecorded) {
@@ -695,7 +714,7 @@ function logRun(runId: number, level: 'info' | 'warn' | 'error', message: string
 // Archive all imported accounts sequentially. A failed account is recorded
 // and the run continues with the next one; only cancellation stops early.
 export async function runArchiveRun(runId: number, options: ArchiveRunOptions = {}): Promise<void> {
-  const run = getArchiveRun(runId);
+  const run = await getArchiveRun(runId);
   if (!run) return;
 
   const excludedFolders = [
@@ -704,10 +723,13 @@ export async function runArchiveRun(runId: number, options: ArchiveRunOptions = 
   ];
 
   try {
-    db.prepare("UPDATE archive_runs SET status = 'running', startedAt = datetime('now') WHERE id = ?").run(runId);
+    await prisma.archiveRun.update({
+      where: { id: runId },
+      data: { status: 'running', startedAt: new Date() },
+    });
 
-    const accounts = db.prepare('SELECT * FROM archive_accounts ORDER BY email').all() as ArchiveAccount[];
-    db.prepare('UPDATE archive_runs SET totalAccounts = ? WHERE id = ?').run(accounts.length, runId);
+    const accounts = await prisma.archiveAccount.findMany({ orderBy: { email: 'asc' } });
+    await prisma.archiveRun.update({ where: { id: runId }, data: { totalAccounts: accounts.length } });
     logRun(runId, 'info', `Starting archive run with ${accounts.length} account(s)`);
 
     let completedAccounts = 0;
@@ -719,18 +741,17 @@ export async function runArchiveRun(runId: number, options: ArchiveRunOptions = 
         throw new ArchiveRunCancelledError();
       }
 
-      const job = createArchiveJob(runId, account, excludedFolders);
-      db.prepare('UPDATE archive_runs SET currentJobId = ?, currentEmail = ? WHERE id = ?').run(
-        job.id,
-        account.email,
-        runId
-      );
+      const job = await createArchiveJob(runId, account, excludedFolders);
+      await prisma.archiveRun.update({
+        where: { id: runId },
+        data: { currentJobId: job.id, currentEmail: account.email },
+      });
       logRun(runId, 'info', `Account ${completedAccounts + 1}/${accounts.length}: archiving ${account.email} (job #${job.id})`);
 
       // Never rejects — per-account problems end up as the job's status
       await runArchiveJob(job.id);
 
-      const finished = getArchiveJob(job.id);
+      const finished = await getArchiveJob(job.id);
       completedAccounts++;
       if (finished?.status === 'failed') {
         failedAccounts++;
@@ -738,26 +759,25 @@ export async function runArchiveRun(runId: number, options: ArchiveRunOptions = 
         accountsWithErrors++;
       } else if (finished?.status === 'cancelled') {
         // The account was cancelled via the run — surface it as a run cancellation
-        db.prepare('UPDATE archive_runs SET completedAccounts = ?, failedAccounts = ? WHERE id = ?').run(
-          completedAccounts,
-          failedAccounts,
-          runId
-        );
+        await prisma.archiveRun.update({
+          where: { id: runId },
+          data: { completedAccounts, failedAccounts },
+        });
         throw new ArchiveRunCancelledError();
       }
 
-      db.prepare('UPDATE archive_runs SET completedAccounts = ?, failedAccounts = ? WHERE id = ?').run(
-        completedAccounts,
-        failedAccounts,
-        runId
-      );
+      await prisma.archiveRun.update({
+        where: { id: runId },
+        data: { completedAccounts, failedAccounts },
+      });
     }
 
     const finalStatus: MigrationJobStatus =
       failedAccounts > 0 || accountsWithErrors > 0 ? 'completed_with_errors' : 'completed';
-    db.prepare(
-      "UPDATE archive_runs SET status = ?, currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-    ).run(finalStatus, runId);
+    await prisma.archiveRun.update({
+      where: { id: runId },
+      data: { status: finalStatus, currentJobId: null, currentEmail: null, completedAt: new Date() },
+    });
     logRun(
       runId,
       finalStatus === 'completed' ? 'info' : 'warn',
@@ -765,15 +785,17 @@ export async function runArchiveRun(runId: number, options: ArchiveRunOptions = 
     );
   } catch (err) {
     if (err instanceof ArchiveRunCancelledError) {
-      db.prepare(
-        "UPDATE archive_runs SET status = 'cancelled', currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(runId);
+      await prisma.archiveRun.update({
+        where: { id: runId },
+        data: { status: 'cancelled', currentJobId: null, currentEmail: null, completedAt: new Date() },
+      });
       logRun(runId, 'warn', 'Archive run cancelled. Zips of accounts that finished before the cancellation are still available.');
     } else {
       const message = err instanceof Error ? err.message : String(err);
-      db.prepare(
-        "UPDATE archive_runs SET status = 'failed', error = ?, currentJobId = NULL, currentEmail = NULL, completedAt = datetime('now') WHERE id = ?"
-      ).run(message, runId);
+      await prisma.archiveRun.update({
+        where: { id: runId },
+        data: { status: 'failed', error: message, currentJobId: null, currentEmail: null, completedAt: new Date() },
+      });
       logRun(runId, 'error', `Archive run failed: ${message}`);
     }
   } finally {

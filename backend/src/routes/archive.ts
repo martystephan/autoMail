@@ -23,14 +23,14 @@ const router = Router();
 
 // Imports and deletes are blocked while a run is active so credentials and
 // zips don't change under it
-function activeArchiveError(): string | undefined {
-  const activeRun = findActiveArchiveRun();
+async function activeArchiveError(): Promise<string | undefined> {
+  const activeRun = await findActiveArchiveRun();
   if (activeRun) return `An archive run (#${activeRun.id}) is currently running`;
   return undefined;
 }
 
 // PUT /api/archive/accounts - Replace the imported accounts
-router.put('/accounts', (req: Request, res: Response) => {
+router.put('/accounts', async (req: Request, res: Response) => {
   try {
     const { imapHost, imapPort, accounts } = req.body;
     const port = parseInt(String(imapPort), 10);
@@ -47,13 +47,13 @@ router.put('/accounts', (req: Request, res: Response) => {
       return;
     }
 
-    const conflict = activeArchiveError();
+    const conflict = await activeArchiveError();
     if (conflict) {
       res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
       return;
     }
 
-    const result = replaceArchiveAccounts(imapHost.trim(), port, accounts);
+    const result = await replaceArchiveAccounts(imapHost.trim(), port, accounts);
     res.json(result);
   } catch (error: any) {
     // Validation errors from the service (bad email, empty password, ...)
@@ -64,31 +64,31 @@ router.put('/accounts', (req: Request, res: Response) => {
 });
 
 // GET /api/archive/accounts - The current import plus its test state
-router.get('/accounts', (_req: Request, res: Response) => {
-  res.json(getArchiveOverview());
+router.get('/accounts', async (_req: Request, res: Response) => {
+  res.json(await getArchiveOverview());
 });
 
 // DELETE /api/archive/accounts - Clear the imported accounts
-router.delete('/accounts', (_req: Request, res: Response) => {
-  const conflict = activeArchiveError();
+router.delete('/accounts', async (_req: Request, res: Response) => {
+  const conflict = await activeArchiveError();
   if (conflict) {
     res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
     return;
   }
 
-  res.json({ deleted: deleteArchiveAccounts() });
+  res.json({ deleted: await deleteArchiveAccounts() });
 });
 
 // DELETE /api/archive/session - Remove the whole archive project
 // (imported accounts, runs, zips, and job history)
-router.delete('/session', (_req: Request, res: Response) => {
-  const conflict = activeArchiveError();
+router.delete('/session', async (_req: Request, res: Response) => {
+  const conflict = await activeArchiveError();
   if (conflict) {
     res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
     return;
   }
 
-  deleteArchiveSession();
+  await deleteArchiveSession();
   res.json({ ok: true });
 });
 
@@ -98,15 +98,15 @@ router.post('/accounts/test', async (req: Request, res: Response) => {
 });
 
 // POST /api/archive/execute - Start an archive run (runs in the background)
-router.post('/execute', (req: Request, res: Response) => {
+router.post('/execute', async (req: Request, res: Response) => {
   try {
-    const conflict = activeArchiveError();
+    const conflict = await activeArchiveError();
     if (conflict) {
       res.status(HTTP_STATUS.CONFLICT).json({ error: conflict });
       return;
     }
 
-    const overview = getArchiveOverview();
+    const overview = await getArchiveOverview();
     if (overview.accounts.length === 0) {
       res.status(HTTP_STATUS.BAD_REQUEST).json({
         error: 'No accounts imported — import a CSV first',
@@ -121,7 +121,7 @@ router.post('/execute', (req: Request, res: Response) => {
       return;
     }
 
-    const run = createArchiveRun(overview.accounts.length);
+    const run = await createArchiveRun(overview.accounts.length);
 
     // Fire and forget — progress is tracked in the DB and polled by the client
     runArchiveRun(run.id, {
@@ -141,15 +141,15 @@ router.post('/execute', (req: Request, res: Response) => {
 });
 
 // GET /api/archive/runs - List recent archive runs
-router.get('/runs', (req: Request, res: Response) => {
+router.get('/runs', async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '20'), 10) || 20));
-  res.json(listArchiveRuns(limit));
+  res.json(await listArchiveRuns(limit));
 });
 
 // GET /api/archive/runs/:id - Run status with per-account jobs and current job detail
-router.get('/runs/:id', (req: Request, res: Response) => {
+router.get('/runs/:id', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const detail = Number.isFinite(runId) ? getArchiveRunDetail(runId) : undefined;
+  const detail = Number.isFinite(runId) ? await getArchiveRunDetail(runId) : undefined;
 
   if (!detail) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Archive run not found' });
@@ -160,9 +160,9 @@ router.get('/runs/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/archive/runs/:id/cancel - Request cancellation of a running archive run
-router.post('/runs/:id/cancel', (req: Request, res: Response) => {
+router.post('/runs/:id/cancel', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.id), 10);
-  const run = Number.isFinite(runId) ? cancelArchiveRun(runId) : undefined;
+  const run = Number.isFinite(runId) ? await cancelArchiveRun(runId) : undefined;
 
   if (!run) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Archive run not found' });
@@ -173,10 +173,10 @@ router.post('/runs/:id/cancel', (req: Request, res: Response) => {
 });
 
 // DELETE /api/archive/runs/:id - Delete a finished run's zips and records
-router.delete('/runs/:id', (req: Request, res: Response) => {
+router.delete('/runs/:id', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.id), 10);
-    const deleted = Number.isFinite(runId) ? deleteArchiveRun(runId) : false;
+    const deleted = Number.isFinite(runId) ? await deleteArchiveRun(runId) : false;
 
     if (!deleted) {
       res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'Archive run not found' });
@@ -191,9 +191,9 @@ router.delete('/runs/:id', (req: Request, res: Response) => {
 });
 
 // GET /api/archive/jobs/:id/download - Stream one account's zip
-router.get('/jobs/:id/download', (req: Request, res: Response) => {
+router.get('/jobs/:id/download', async (req: Request, res: Response) => {
   const jobId = parseInt(String(req.params.id), 10);
-  const job = Number.isFinite(jobId) ? getArchiveJob(jobId) : undefined;
+  const job = Number.isFinite(jobId) ? await getArchiveJob(jobId) : undefined;
 
   if (!job || !job.zipPath) {
     res.status(HTTP_STATUS.NOT_FOUND).json({ error: 'No zip exists for this job' });

@@ -1,0 +1,381 @@
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model MailAccount {
+  id           Int       @id @default(autoincrement())
+  name         String
+  type         String
+  email        String
+  imapHost     String?
+  imapPort     Int?
+  password     String?
+  accessToken  String?
+  refreshToken String?
+  tokenExpiry  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @default(now()) @updatedAt
+
+  sourceFlows         AutomationFlow[] @relation("FlowSourceAccount")
+  targetFlows         AutomationFlow[] @relation("FlowTargetAccount")
+  sourceMigrationJobs MigrationJob[]   @relation("JobSourceAccount")
+  targetMigrationJobs MigrationJob[]   @relation("JobTargetAccount")
+
+  @@map("mail_accounts")
+}
+
+model AutomationFlow {
+  id                  Int       @id @default(autoincrement())
+  name                String
+  sourceMailAccountId Int
+  sourceMailbox       String
+  targetMailAccountId Int
+  targetMailbox       String
+  enabled             Boolean   @default(true)
+  intervalMinutes     Int       @default(60)
+  lastRun             DateTime?
+  nextRun             DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @default(now()) @updatedAt
+
+  sourceMailAccount MailAccount           @relation("FlowSourceAccount", fields: [sourceMailAccountId], references: [id], onDelete: Cascade)
+  targetMailAccount MailAccount           @relation("FlowTargetAccount", fields: [targetMailAccountId], references: [id], onDelete: Cascade)
+  executions        AutomationExecution[]
+
+  @@map("automation_flows")
+}
+
+model AutomationExecution {
+  id           Int       @id @default(autoincrement())
+  flowId       Int
+  status       String
+  movedCount   Int       @default(0)
+  errorMessage String?
+  startedAt    DateTime  @default(now())
+  completedAt  DateTime?
+
+  flow AutomationFlow @relation(fields: [flowId], references: [id], onDelete: Cascade)
+
+  @@map("automation_executions")
+}
+
+// The bulk migration project: imported CSV accounts and run history. Pure
+// follow-along data — it is never used to resume a run from a point (every
+// run compares source and target and skips what already exists). It lives
+// until the user deletes the project.
+
+model BulkAccount {
+  id          Int      @id @default(autoincrement())
+  role        String // 'source' | 'target'
+  email       String
+  targetEmail String? // source rows only: match this target email instead of the own one
+  username    String // IMAP login
+  password    String // AES-encrypted at rest
+  imapHost    String
+  imapPort    Int
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  sourceMigrationJobs MigrationJob[] @relation("JobSourceBulkAccount")
+  targetMigrationJobs MigrationJob[] @relation("JobTargetBulkAccount")
+
+  @@unique([role, email])
+  @@map("bulk_accounts")
+}
+
+// One bulk run = a sequential batch of per-pair migration jobs
+
+model BulkRun {
+  id             Int       @id @default(autoincrement())
+  status         String    @default("pending")
+  totalPairs     Int       @default(0)
+  completedPairs Int       @default(0)
+  failedPairs    Int       @default(0)
+  currentJobId   Int?
+  currentEmail   String?
+  error          String?
+  createdAt      DateTime  @default(now())
+  startedAt      DateTime?
+  completedAt    DateTime?
+
+  jobs MigrationJob[]
+
+  @@map("bulk_runs")
+}
+
+model MigrationJob {
+  id                  Int       @id @default(autoincrement())
+  sourceAccountId     Int?
+  targetAccountId     Int?
+  mode                String    @default("single")
+  bulkRunId           Int?
+  sourceBulkAccountId Int?
+  targetBulkAccountId Int?
+  bulkEmail           String?
+  status              String    @default("pending")
+  excludedFolders     String    @default("null") // JSON array or "null" (= use defaults)
+  totalFolders        Int       @default(0)
+  totalMessages       Int       @default(0)
+  processedMessages   Int       @default(0)
+  copiedMessages      Int       @default(0)
+  skippedMessages     Int       @default(0)
+  failedMessages      Int       @default(0)
+  currentFolder       String?
+  error               String?
+  createdAt           DateTime  @default(now())
+  startedAt           DateTime?
+  completedAt         DateTime?
+
+  sourceAccount     MailAccount?      @relation("JobSourceAccount", fields: [sourceAccountId], references: [id], onDelete: Cascade)
+  targetAccount     MailAccount?      @relation("JobTargetAccount", fields: [targetAccountId], references: [id], onDelete: Cascade)
+  bulkRun           BulkRun?          @relation(fields: [bulkRunId], references: [id], onDelete: Cascade)
+  sourceBulkAccount BulkAccount?      @relation("JobSourceBulkAccount", fields: [sourceBulkAccountId], references: [id], onDelete: SetNull)
+  targetBulkAccount BulkAccount?      @relation("JobTargetBulkAccount", fields: [targetBulkAccountId], references: [id], onDelete: SetNull)
+  folders           MigrationFolder[]
+  logs              MigrationLog[]
+
+  @@map("migration_jobs")
+}
+
+model MigrationFolder {
+  id           Int       @id @default(autoincrement())
+  jobId        Int
+  path         String // path on the source account
+  targetPath   String // path on the target account (delimiter-translated)
+  status       String    @default("pending")
+  messageCount Int       @default(0)
+  copiedCount  Int       @default(0)
+  skippedCount Int       @default(0)
+  failedCount  Int       @default(0)
+  error        String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  job MigrationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_migration_folders_job")
+  @@map("migration_folders")
+}
+
+model MigrationLog {
+  id         Int      @id @default(autoincrement())
+  jobId      Int
+  level      String   @default("info") // info | warn | error
+  folderPath String?
+  uid        Int?
+  message    String
+  createdAt  DateTime @default(now())
+
+  job MigrationJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_migration_logs_job")
+  @@map("migration_logs")
+}
+
+// The archive project: imported CSV accounts and run history. Read-only
+// exports — each run writes one zip of .eml files per account; the zips
+// stay on disk until the user deletes the run or the project.
+
+model ArchiveAccount {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique
+  username  String // IMAP login
+  password  String // AES-encrypted at rest
+  imapHost  String
+  imapPort  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @default(now()) @updatedAt
+
+  jobs ArchiveJob[]
+
+  @@map("archive_accounts")
+}
+
+// One archive run = a sequential batch of per-account archive jobs
+
+model ArchiveRun {
+  id                Int       @id @default(autoincrement())
+  status            String    @default("pending")
+  totalAccounts     Int       @default(0)
+  completedAccounts Int       @default(0)
+  failedAccounts    Int       @default(0)
+  currentJobId      Int?
+  currentEmail      String?
+  error             String?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  jobs ArchiveJob[]
+
+  @@map("archive_runs")
+}
+
+model ArchiveJob {
+  id                Int       @id @default(autoincrement())
+  runId             Int
+  archiveAccountId  Int?
+  email             String
+  status            String    @default("pending")
+  excludedFolders   String    @default("[]") // JSON array of special-use flags ('\Trash', '\Junk')
+  totalFolders      Int       @default(0)
+  totalMessages     Int       @default(0)
+  processedMessages Int       @default(0)
+  savedMessages     Int       @default(0)
+  failedMessages    Int       @default(0)
+  currentFolder     String?
+  zipPath           String? // relative to ARCHIVE_DIR, set once the zip exists
+  zipSize           Int?
+  error             String?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  run            ArchiveRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  archiveAccount ArchiveAccount? @relation(fields: [archiveAccountId], references: [id], onDelete: SetNull)
+  folders        ArchiveFolder[]
+  logs           ArchiveLog[]
+
+  @@index([runId], map: "idx_archive_jobs_run")
+  @@map("archive_jobs")
+}
+
+model ArchiveFolder {
+  id           Int       @id @default(autoincrement())
+  jobId        Int
+  path         String
+  status       String    @default("pending")
+  messageCount Int       @default(0)
+  savedCount   Int       @default(0)
+  failedCount  Int       @default(0)
+  error        String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+
+  job ArchiveJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_archive_folders_job")
+  @@map("archive_folders")
+}
+
+model ArchiveLog {
+  id         Int      @id @default(autoincrement())
+  jobId      Int
+  level      String   @default("info") // info | warn | error
+  folderPath String?
+  uid        Int?
+  message    String
+  createdAt  DateTime @default(now())
+
+  job ArchiveJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_archive_logs_job")
+  @@map("archive_logs")
+}
+
+// Connection test runs: every row of an uploaded CSV gets an IMAP login
+// attempt and its verdict is kept for display. Passwords are NEVER stored —
+// a run interrupted by a restart cannot resume and needs a fresh upload.
+
+model ConnectionTestRun {
+  id                Int       @id @default(autoincrement())
+  status            String    @default("pending")
+  imapHost          String
+  imapPort          Int
+  totalAccounts     Int       @default(0)
+  processedAccounts Int       @default(0)
+  okAccounts        Int       @default(0)
+  failedAccounts    Int       @default(0)
+  error             String?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  results ConnectionTestResult[]
+
+  @@map("connection_test_runs")
+}
+
+model ConnectionTestResult {
+  id       Int       @id @default(autoincrement())
+  runId    Int
+  email    String
+  username String
+  status   String    @default("pending")
+  error    String?
+  testedAt DateTime?
+
+  run ConnectionTestRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId], map: "idx_connection_test_results_run")
+  @@map("connection_test_results")
+}
+
+model User {
+  id            String    @id
+  name          String
+  email         String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@index([userId])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+  @@map("verification")
+}

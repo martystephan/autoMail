@@ -1,83 +1,67 @@
-import {
-  createContext,
-  useContext,
-  useState,
-  useEffect,
-  type ReactNode,
-} from "react";
-import {
-  type User,
-  getSetupStatus,
-  getCurrentUser,
-  login as apiLogin,
-  register as apiRegister,
-} from "../api/auth";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { authClient } from "../lib/authClient";
+import { getSetupStatus } from "../api/auth";
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+}
 
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   needsSetup: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  register: (username: string, password: string) => Promise<void>;
-  logout: () => void;
+  login: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const { data: session, isPending } = authClient.useSession();
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [setupLoading, setSetupLoading] = useState(true);
 
   useEffect(() => {
-    checkAuth();
+    getSetupStatus()
+      .then((status) => setNeedsSetup(status.needsSetup))
+      .catch(() => setNeedsSetup(false))
+      .finally(() => setSetupLoading(false));
   }, []);
 
-  async function checkAuth() {
-    try {
-      // First check if setup is needed
-      const status = await getSetupStatus();
-      setNeedsSetup(status.needsSetup);
-
-      if (status.needsSetup) {
-        setIsLoading(false);
-        return;
-      }
-
-      // Check if we have a valid token
-      const token = localStorage.getItem("authToken");
-      if (token) {
-        const { user } = await getCurrentUser(token);
-        setUser(user);
-      }
-    } catch (error) {
-      localStorage.removeItem("authToken");
-    } finally {
-      setIsLoading(false);
-    }
+  // The better-auth client returns { data, error } instead of throwing —
+  // convert errors so the pages' catch blocks keep working.
+  async function login(email: string, password: string) {
+    const { error } = await authClient.signIn.email({ email, password });
+    if (error) throw new Error(error.message || "Login failed");
   }
 
-  async function login(username: string, password: string) {
-    const { token, user } = await apiLogin(username, password);
-    localStorage.setItem("authToken", token);
-    setUser(user);
-  }
-
-  async function register(username: string, password: string) {
-    const { token, user } = await apiRegister(username, password);
-    localStorage.setItem("authToken", token);
-    setUser(user);
+  async function register(email: string, password: string) {
+    const { error } = await authClient.signUp.email({
+      email,
+      password,
+      name: email.split("@")[0],
+    });
+    if (error) throw new Error(error.message || "Registration failed");
     setNeedsSetup(false);
   }
 
-  function logout() {
-    localStorage.removeItem("authToken");
-    setUser(null);
+  async function logout() {
+    await authClient.signOut();
   }
 
   return (
     <AuthContext.Provider
-      value={{ user, isLoading, needsSetup, login, register, logout }}
+      value={{
+        user: session?.user ?? null,
+        isLoading: isPending || setupLoading,
+        needsSetup,
+        login,
+        register,
+        logout,
+      }}
     >
       {children}
     </AuthContext.Provider>
