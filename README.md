@@ -32,63 +32,26 @@ autoMail connects your IMAP and Microsoft mail accounts, letting you create auto
 
 ### Docker Compose (recommended)
 
-Create a `docker-compose.yml`:
-
-```yaml
-services:
-  backend:
-    image: ghcr.io/sleepzhh/automail/backend:latest
-    environment:
-      - NODE_ENV=production
-      - PORT=4000
-      - BACKEND_URL=http://localhost:4000
-      - FRONTEND_URL=http://localhost
-      - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
-      - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
-      - JWT_SECRET=${JWT_SECRET}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-    volumes:
-      - automail-data:/app/data
-    networks:
-      - automail-network
-    restart: unless-stopped
-
-  frontend:
-    image: ghcr.io/sleepzhh/automail/frontend:latest
-    ports:
-      - "80:80"
-    environment:
-      - BACKEND_URL=http://backend:4000
-    depends_on:
-      - backend
-    networks:
-      - automail-network
-    restart: unless-stopped
-
-volumes:
-  automail-data:
-
-networks:
-  automail-network:
-    driver: bridge
-```
-
-Create a `.env` file:
+From the repository root, build and start the application:
 
 ```bash
-MICROSOFT_CLIENT_ID=your-client-id
-MICROSOFT_CLIENT_SECRET=your-client-secret
-JWT_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 32)
-```
-
-Start the application:
-
-```bash
-docker compose up -d
+docker compose up --build -d
 ```
 
 Visit `http://localhost`
+
+On the first start, the backend generates the Prisma client during the image
+build and applies all database migrations before serving requests. The SQLite
+database is retained in the `sqlite-data` Docker volume.
+
+No `.env` file is required for local-only use. The Compose file contains stable
+development secrets so encrypted account credentials and login sessions survive
+container restarts. Before exposing AutoMail outside your machine, create a
+`.env` file and set unique `BETTER_AUTH_SECRET`, `JWT_SECRET`, and
+`ENCRYPTION_KEY` values generated with `openssl rand -hex 32`.
+
+> **Note:** this setup initializes a new v0.3 database. Upgrading an existing
+> v0.2 Docker volume is not supported yet.
 
 ## Configuration
 
@@ -96,6 +59,8 @@ Visit `http://localhost`
 |----------|-------------|
 | `MICROSOFT_CLIENT_ID` | Azure OAuth client ID |
 | `MICROSOFT_CLIENT_SECRET` | Azure OAuth client secret |
+| `BETTER_AUTH_SECRET` | Secret used to sign Better Auth cookies and sessions |
+| `BETTER_AUTH_URL` | Public application URL used by Better Auth |
 | `JWT_SECRET` | 32-byte hex key for JWT tokens |
 | `ENCRYPTION_KEY` | 32-byte hex key for token encryption |
 | `BACKEND_URL` | Public URL of backend (for OAuth callbacks) |

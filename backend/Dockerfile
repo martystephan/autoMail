@@ -1,7 +1,8 @@
-FROM node:20-alpine
+FROM node:22-alpine
 
-# Install build dependencies for better-sqlite3 native module
-RUN apk add --no-cache python3 make g++
+# Prisma's Alpine engine needs OpenSSL at runtime. Keep the build toolchain for
+# any transitive native dependencies installed by npm.
+RUN apk add --no-cache openssl python3 make g++
 
 WORKDIR /app
 
@@ -11,6 +12,9 @@ RUN npm ci
 
 # Copy source
 COPY . .
+
+# npm ci runs before the Prisma schema is copied, so generate the client now.
+RUN npx prisma generate
 
 # Create data directory for SQLite
 RUN mkdir -p /app/data

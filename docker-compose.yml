@@ -7,13 +7,18 @@ services:
       - NODE_ENV=production
       - PORT=4000
       - DATABASE_URL=file:/app/data/automail.db
-      - BACKEND_URL=${BACKEND_URL:-http://localhost:4000}
+      # Local requests reach the backend through the frontend's /api proxy.
+      - BACKEND_URL=${BACKEND_URL:-http://localhost}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost}
+      - BETTER_AUTH_URL=${BETTER_AUTH_URL:-http://localhost}
+      # Development-only fallbacks make local Compose persistent across
+      # restarts. Set unique values in .env for every real deployment.
+      - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-f7ab4ec2aad538246a90fdc20019a0cc1295b2d8604feac022203457456a624e}
       - MICROSOFT_CLIENT_ID=${MICROSOFT_CLIENT_ID}
       - MICROSOFT_CLIENT_SECRET=${MICROSOFT_CLIENT_SECRET}
       - DISABLE_MICROSOFT_OAUTH=${DISABLE_MICROSOFT_OAUTH:-false}
-      - JWT_SECRET=${JWT_SECRET}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - JWT_SECRET=${JWT_SECRET:-c58b3ef746659c77b64825b84057b0e8d1ddaa7c3f3370e164861fc15672cb49}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-0b4abe64baa185ee0a47cc847bccbb542739ecd316579da93f64ab152dd2230c}
     volumes:
       - sqlite-data:/app/data
     networks:
