@@ -16,6 +16,11 @@ export type {
   ArchiveJob,
   ArchiveFolder,
   ArchiveLog,
+  ImportAccount,
+  ImportRun,
+  ImportJob,
+  ImportFolder,
+  ImportLog,
   ConnectionTestRun,
   ConnectionTestResult,
 } from '@prisma/client';

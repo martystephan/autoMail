@@ -13,11 +13,13 @@ import oauthRouter, { oauthPublicRouter } from "./src/routes/oauth";
 import migrationRouter from "./src/routes/migration";
 import bulkMigrationRouter from "./src/routes/bulkMigration";
 import archiveRouter from "./src/routes/archive";
+import importRouter from "./src/routes/import";
 import connectionTestRouter from "./src/routes/connectionTest";
 import { requireAuth } from "./src/middleware/auth";
 import { startScheduler } from "./src/services/automation";
 import { recoverInterruptedJobs } from "./src/services/migration";
 import { recoverInterruptedArchiveJobs, cleanupArchiveTempDir } from "./src/services/archive";
+import { recoverInterruptedImportJobs } from "./src/services/import";
 import { recoverInterruptedConnectionTestRuns } from "./src/services/connectionTest";
 
 const app = express();
@@ -51,6 +53,7 @@ app.use("/api/oauth", requireAuth, oauthRouter);
 app.use("/api/migration/bulk", requireAuth, bulkMigrationRouter);
 app.use("/api/migration", requireAuth, migrationRouter);
 app.use("/api/archive", requireAuth, archiveRouter);
+app.use("/api/import", requireAuth, importRouter);
 app.use("/api/connection-test", requireAuth, connectionTestRouter);
 
 // Start server
@@ -62,6 +65,7 @@ app.listen(PORT, async () => {
     // as interrupted. This is display-only: a new run never reads old run data.
     await recoverInterruptedJobs();
     await recoverInterruptedArchiveJobs();
+    await recoverInterruptedImportJobs();
     await recoverInterruptedConnectionTestRuns();
   } catch (error) {
     console.error("Failed to recover interrupted jobs:", error);

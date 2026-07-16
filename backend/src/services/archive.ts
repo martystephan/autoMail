@@ -14,6 +14,15 @@ import {
 import { encryptPassword, decryptPassword } from '../utils/crypto';
 import { withImapClient, buildImapClient, safeCloseImapClient, ImapCredentials } from '../utils/imapClient';
 import { getFolders, detectSourceHeadRoles, applyRoleExclusions } from './migration';
+import {
+  ARCHIVE_MANIFEST_FORMAT,
+  ARCHIVE_MANIFEST_NAME,
+  ARCHIVE_MANIFEST_VERSION,
+  ArchiveManifest,
+  ArchiveManifestFolder,
+  ArchiveMessageMeta,
+  FOLDER_MESSAGES_NAME,
+} from '../types/archiveFormat';
 
 // Where the produced zips live. Zips are written to run-<id>/ subfolders and
 // stay until the user deletes the run; tmp/ only exists while a run is active.
@@ -489,12 +498,13 @@ async function archiveFolder(
       const batch = uids.slice(offset, offset + BATCH_SIZE);
       let batchSaved = 0;
       let batchFailed = 0;
+      const batchMeta: ArchiveMessageMeta[] = [];
 
       for (const uid of batch) {
         try {
           const message = await source.fetchOne(
             String(uid),
-            { uid: true, envelope: true, source: true },
+            { uid: true, envelope: true, source: true, flags: true, internalDate: true },
             { uid: true }
           );
 
@@ -504,12 +514,30 @@ async function archiveFolder(
             continue;
           }
 
-          await fsp.writeFile(emlFilePath(folderDir, uid, message.envelope?.subject), message.source);
+          const filePath = emlFilePath(folderDir, uid, message.envelope?.subject);
+          await fsp.writeFile(filePath, message.source);
+          batchMeta.push({
+            file: path.basename(filePath),
+            uid,
+            flags: message.flags ? Array.from(message.flags).filter((flag) => flag !== '\\Recent') : [],
+            internalDate: message.internalDate ? new Date(message.internalDate).toISOString() : undefined,
+            messageId: message.envelope?.messageId ?? undefined,
+            subject: message.envelope?.subject ?? undefined,
+          });
           batchSaved++;
         } catch (err) {
           batchFailed++;
           await logJob(jobId, 'error', `Failed to save message UID ${uid}: ${errorMessage(err)}`, folder.path, uid);
         }
+      }
+
+      // Restore metadata (flags, internal date, Message-ID) for the batch —
+      // appended so at most one batch of records is held in memory
+      if (batchMeta.length > 0) {
+        await fsp.appendFile(
+          path.join(folderDir, FOLDER_MESSAGES_NAME),
+          batchMeta.map((meta) => JSON.stringify(meta)).join('\n') + '\n'
+        );
       }
 
       saved += batchSaved;
@@ -587,12 +615,22 @@ async function runArchiveJob(jobId: number): Promise<void> {
     await logJob(jobId, 'info', `Found ${folders.length} folders with ${totalMessages} messages to archive`);
 
     const dirByPath = new Map<string, string>();
+    const manifestFolders: ArchiveManifestFolder[] = [];
     for (const folder of folders) {
       await prisma.archiveFolder.create({
         data: { jobId, path: folder.path, messageCount: folder.messageCount },
       });
       const segments = folder.path.split(folder.delimiter || '/').map(sanitizeSegment);
       dirByPath.set(folder.path, path.join(tmpDir, ...segments));
+      manifestFolders.push({
+        zipPath: segments.join('/'),
+        originalPath: folder.path,
+        name: folder.name,
+        delimiter: folder.delimiter,
+        specialUse: folder.specialUse,
+        flaggedSpecialUse: folder.flaggedSpecialUse,
+        messageCount: folder.messageCount,
+      });
     }
     await prisma.archiveJob.update({
       where: { id: jobId },
@@ -640,8 +678,17 @@ async function runArchiveJob(jobId: number): Promise<void> {
       }
     }
 
-    // Step 3: zip the account and drop the temp files
+    // Step 3: zip the account and drop the temp files. The manifest makes the
+    // zip importable with full fidelity (original paths, roles, flags, dates).
     checkCancelled(jobId);
+    const manifest: ArchiveManifest = {
+      format: ARCHIVE_MANIFEST_FORMAT,
+      version: ARCHIVE_MANIFEST_VERSION,
+      email: job.email,
+      exportedAt: new Date().toISOString(),
+      folders: manifestFolders,
+    };
+    await fsp.writeFile(path.join(tmpDir, ARCHIVE_MANIFEST_NAME), JSON.stringify(manifest, null, 2));
     await prisma.archiveJob.update({ where: { id: jobId }, data: { currentFolder: '(creating zip)' } });
     await logJob(jobId, 'info', `Creating zip ${zipRelPath}`);
     await fsp.mkdir(path.dirname(zipAbsPath), { recursive: true });

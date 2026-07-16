@@ -279,6 +279,109 @@ model ArchiveLog {
   @@map("archive_logs")
 }
 
+// The import project: imported CSV accounts (each referencing an uploaded
+// archive zip) and run history. The uploaded zips themselves are NOT modeled
+// here — data/imports/uploads/ on disk is the source of truth.
+
+model ImportAccount {
+  id          Int      @id @default(autoincrement())
+  email       String   @unique
+  username    String // IMAP login
+  password    String // AES-encrypted at rest
+  imapHost    String
+  imapPort    Int
+  zipFileName String // sanitized basename, matched against uploaded zips
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @default(now()) @updatedAt
+
+  jobs ImportJob[]
+
+  @@map("import_accounts")
+}
+
+// One import run = a sequential batch of per-account import jobs
+
+model ImportRun {
+  id                Int       @id @default(autoincrement())
+  status            String    @default("pending")
+  totalAccounts     Int       @default(0)
+  completedAccounts Int       @default(0)
+  failedAccounts    Int       @default(0)
+  currentJobId      Int?
+  currentEmail      String?
+  error             String?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  jobs ImportJob[]
+
+  @@map("import_runs")
+}
+
+model ImportJob {
+  id                Int       @id @default(autoincrement())
+  runId             Int
+  importAccountId   Int?
+  email             String
+  zipFileName       String
+  status            String    @default("pending")
+  totalFolders      Int       @default(0)
+  totalMessages     Int       @default(0) // .eml entries found in the zip
+  processedMessages Int       @default(0)
+  importedMessages  Int       @default(0)
+  skippedMessages   Int       @default(0) // already on the target (dedupe)
+  failedMessages    Int       @default(0)
+  currentFolder     String?
+  error             String?
+  createdAt         DateTime  @default(now())
+  startedAt         DateTime?
+  completedAt       DateTime?
+
+  run           ImportRun      @relation(fields: [runId], references: [id], onDelete: Cascade)
+  importAccount ImportAccount? @relation(fields: [importAccountId], references: [id], onDelete: SetNull)
+  folders       ImportFolder[]
+  logs          ImportLog[]
+
+  @@index([runId], map: "idx_import_jobs_run")
+  @@map("import_jobs")
+}
+
+model ImportFolder {
+  id            Int       @id @default(autoincrement())
+  jobId         Int
+  path          String // folder path inside the zip ('/'-joined)
+  targetPath    String // mapped path on the target account
+  status        String    @default("pending")
+  messageCount  Int       @default(0)
+  importedCount Int       @default(0)
+  skippedCount  Int       @default(0)
+  failedCount   Int       @default(0)
+  error         String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_import_folders_job")
+  @@map("import_folders")
+}
+
+model ImportLog {
+  id         Int      @id @default(autoincrement())
+  jobId      Int
+  level      String   @default("info") // info | warn | error
+  folderPath String?
+  entryName  String? // zip entry name instead of a UID
+  message    String
+  createdAt  DateTime @default(now())
+
+  job ImportJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId], map: "idx_import_logs_job")
+  @@map("import_logs")
+}
+
 // Connection test runs: every row of an uploaded CSV gets an IMAP login
 // attempt and its verdict is kept for display. Passwords are NEVER stored —
 // a run interrupted by a restart cannot resume and needs a fresh upload.

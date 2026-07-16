@@ -11,6 +11,7 @@ import MailAccountsPage from "./pages/MailAccountsPage";
 import AutomationFlowsPage from "./pages/AutomationFlowsPage";
 import MigrationPage from "./pages/MigrationPage";
 import ArchivePage from "./pages/ArchivePage";
+import ImportPage from "./pages/ImportPage";
 import ConnectionTestPage from "./pages/ConnectionTestPage";
 import OAuthCallbackPage from "./pages/OAuthCallbackPage";
 import LoginPage from "./pages/LoginPage";
@@ -77,6 +78,14 @@ function AppRoutes() {
         element={
           <Layout>
             <ArchivePage />
+          </Layout>
+        }
+      />
+      <Route
+        path="/import"
+        element={
+          <Layout>
+            <ImportPage />
           </Layout>
         }
       />

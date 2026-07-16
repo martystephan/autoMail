@@ -21,6 +21,8 @@
     "express": "^5.2.1",
     "imapflow": "^1.2.6",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
+    "node-stream-zip": "^1.15.0",
     "ts-node": "^10.9.2"
   },
   "devDependencies": {
@@ -28,6 +30,7 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.2.0",
     "@types/node": "^25.0.6",
     "prisma": "^6.19.3",
     "typescript": "^5.9.3"

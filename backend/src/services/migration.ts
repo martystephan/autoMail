@@ -220,7 +220,7 @@ export async function getFolders(
 // mapped parent: "INBOX/Sent Messages/2023" -> "<target sent folder>/2023".
 // ---------------------------------------------------------------------------
 
-type FolderRole = 'sent' | 'drafts' | 'trash' | 'junk' | 'archive';
+export type FolderRole = 'sent' | 'drafts' | 'trash' | 'junk' | 'archive';
 
 const SPECIAL_USE_ROLES: Record<string, FolderRole> = {
   '\\Sent': 'sent',
@@ -272,7 +272,7 @@ function canonicalSegments(path: string, delimiter: string): string[] {
   return segments;
 }
 
-interface TargetLayout {
+export interface TargetLayout {
   delimiter: string;
   // ['INBOX'] when the target roots all folders inside INBOX, otherwise []
   rootPrefix: string[];
@@ -280,7 +280,7 @@ interface TargetLayout {
   roleFolders: Map<FolderRole, string[]>;
 }
 
-function detectTargetLayout(
+export function detectTargetLayout(
   mailboxes: { path: string; delimiter?: string; specialUse?: string; flags?: Set<string> }[]
 ): TargetLayout {
   const delimiter = mailboxes.find((m) => m.delimiter)?.delimiter || '/';
@@ -380,7 +380,7 @@ export function applyRoleExclusions(
   });
 }
 
-function mapSourceFolderToTarget(
+export function mapSourceFolderToTarget(
   folder: FolderInfo,
   headRoles: Map<string, HeadRole>,
   layout: TargetLayout
@@ -605,7 +605,7 @@ function errorMessage(err: unknown): string {
 // Identity of a message for source/target comparison: the Message-ID header
 // when it has one, otherwise a fingerprint of internal date + subject.
 // Returns null when neither is available — such messages are always copied.
-function messageDedupeKey(message: {
+export function messageDedupeKey(message: {
   envelope?: { messageId?: string; subject?: string };
   internalDate?: Date | string;
 }): string | null {

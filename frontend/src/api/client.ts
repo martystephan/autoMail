@@ -36,6 +36,34 @@ export async function apiRequest<T>(
   return response.json();
 }
 
+// Send multipart form data (file uploads). No Content-Type header — the
+// browser sets it with the correct multipart boundary.
+export async function apiUpload<T>(endpoint: string, formData: FormData): Promise<T> {
+  const url = `${API_BASE_URL}${endpoint}`;
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      body: formData,
+    });
+  } catch (error) {
+    throw toApiError(error);
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      window.location.reload();
+      throw new Error('Session expired');
+    }
+    const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(error.error || `HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
 // Fetch a file from an authenticated endpoint as a blob, so downloads share
 // the same 401 handling as regular API calls.
 export async function apiFetchBlob(endpoint: string): Promise<Blob> {
