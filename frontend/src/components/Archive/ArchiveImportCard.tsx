@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import {
@@ -11,6 +11,7 @@ import {
 import {
   Alert,
   Button,
+  FilePicker,
   Input,
   Label,
   Card,
@@ -91,7 +92,6 @@ export default function ArchiveImportCard({
   const [isImporting, setIsImporting] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (file: File) => {
     const reader = new FileReader();
@@ -105,7 +105,6 @@ export default function ArchiveImportCard({
   const resetFileSelection = () => {
     setParsed(null);
     setFileName(null);
-    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const handleImport = async () => {
@@ -209,17 +208,13 @@ export default function ArchiveImportCard({
 
         <div>
           <Label htmlFor="archive-csv-file">CSV File (email, username, password)</Label>
-          <input
+          <FilePicker
             id="archive-csv-file"
-            ref={fileInputRef}
-            type="file"
             accept=".csv,text/csv,text/plain"
             disabled={disabled}
-            onChange={(e) => {
-              const file = e.target.files?.[0];
-              if (file) handleFile(file);
-            }}
-            className="block w-full text-sm text-neutral-600 file:mr-3 file:px-3 file:py-1.5 file:rounded-md file:border-0 file:bg-neutral-100 file:text-sm file:font-medium file:text-neutral-700 hover:file:bg-neutral-200 disabled:cursor-not-allowed"
+            title="Choose a CSV file"
+            selection={fileName}
+            onFiles={(files) => handleFile(files[0])}
           />
         </div>
 
