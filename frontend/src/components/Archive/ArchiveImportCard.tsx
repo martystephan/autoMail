@@ -1,5 +1,4 @@
-import { useState } from "react";
-import Papa from "papaparse";
+import { useMemo, useState } from "react";
 import { toast } from "sonner";
 import {
   importArchiveAccounts,
@@ -11,7 +10,7 @@ import {
 import {
   Alert,
   Button,
-  FilePicker,
+  CsvEditor,
   Input,
   Label,
   Card,
@@ -19,37 +18,35 @@ import {
   CardTitle,
   CardDescription,
   CardContent,
+  type CsvColumn,
+  type CsvRow,
 } from "../ui";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-interface ParsedCsv {
+const COLUMNS: CsvColumn[] = [
+  { key: "email", label: "Email", required: true },
+  { key: "username", label: "Username", required: true },
+  { key: "password", label: "Password", required: true },
+];
+
+interface Validated {
   rows: ArchiveImportRow[];
   problems: string[];
 }
 
-// Fixed column order: email, username, password. A first row whose first cell
-// looks like a header ("email", "E-Mail", ...) is dropped.
-function parseCsv(text: string): ParsedCsv {
-  const result = Papa.parse<string[]>(text.replace(/^﻿/, ""), {
-    skipEmptyLines: "greedy",
-  });
-
-  let lines = result.data;
-  if (lines.length > 0 && /e-?mail/i.test(lines[0][0] ?? "")) {
-    lines = lines.slice(1);
-  }
-
-  const rows: ArchiveImportRow[] = [];
+function validateRows(rows: CsvRow[]): Validated {
+  const validRows: ArchiveImportRow[] = [];
   const problems: string[] = [];
   const seen = new Set<string>();
 
-  lines.forEach((line, index) => {
-    const email = (line[0] ?? "").trim().toLowerCase();
-    const username = (line[1] ?? "").trim();
-    const password = line[2] ?? "";
+  rows.forEach((row, index) => {
+    const email = (row.email ?? "").trim().toLowerCase();
+    const username = (row.username ?? "").trim();
+    const password = row.password ?? "";
     const rowNumber = index + 1;
 
+    if (!email && !username && !password) return; // blank manual row
     if (!EMAIL_REGEX.test(email)) {
       problems.push(`Row ${rowNumber}: "${email || "(empty)"}" is not a valid email address`);
       return;
@@ -66,10 +63,10 @@ function parseCsv(text: string): ParsedCsv {
       problems.push(`Row ${rowNumber}: duplicate email ${email} — the last occurrence will be used`);
     }
     seen.add(email);
-    rows.push({ email, username, password });
+    validRows.push({ email, username, password });
   });
 
-  return { rows, problems };
+  return { rows: validRows, problems };
 }
 
 interface ArchiveImportCardProps {
@@ -87,28 +84,15 @@ export default function ArchiveImportCard({
 }: ArchiveImportCardProps) {
   const [imapHost, setImapHost] = useState("");
   const [imapPort, setImapPort] = useState("993");
-  const [parsed, setParsed] = useState<ParsedCsv | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [rows, setRows] = useState<CsvRow[]>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
 
-  const handleFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      setFileName(file.name);
-      setParsed(parseCsv(String(reader.result ?? "")));
-    };
-    reader.readAsText(file);
-  };
-
-  const resetFileSelection = () => {
-    setParsed(null);
-    setFileName(null);
-  };
+  const validated = useMemo(() => validateRows(rows), [rows]);
 
   const handleImport = async () => {
-    if (!parsed || parsed.rows.length === 0) return;
+    if (validated.rows.length === 0) return;
     const port = parseInt(imapPort, 10);
     if (!imapHost.trim()) {
       toast.error("Enter the IMAP host first");
@@ -124,11 +108,11 @@ export default function ArchiveImportCard({
       const result = await importArchiveAccounts({
         imapHost: imapHost.trim(),
         imapPort: port,
-        accounts: parsed.rows,
+        accounts: validated.rows,
       });
       result.warnings.forEach((warning) => toast.warning(warning));
       toast.success(`Imported ${result.accounts.length} account(s)`);
-      resetFileSelection();
+      setRows([]);
       onChanged();
     } catch (error) {
       toast.error(`Import failed: ${error}`);
@@ -171,7 +155,7 @@ export default function ArchiveImportCard({
     }
   };
 
-  const validRows = parsed?.rows.length ?? 0;
+  const validRows = validated.rows.length;
 
   return (
     <Card>
@@ -207,38 +191,36 @@ export default function ArchiveImportCard({
         </div>
 
         <div>
-          <Label htmlFor="archive-csv-file">CSV File (email, username, password)</Label>
-          <FilePicker
-            id="archive-csv-file"
-            accept=".csv,text/csv,text/plain"
+          <Label>CSV File (email, username, password)</Label>
+          <CsvEditor
+            columns={COLUMNS}
+            rows={rows}
+            onChange={setRows}
             disabled={disabled}
-            title="Choose a CSV file"
-            selection={fileName}
-            onFiles={(files) => handleFile(files[0])}
+            downloadFileName="archive-accounts.csv"
+            showRequiredAlert={false}
           />
         </div>
 
-        {parsed && (
-          <div className="space-y-2">
-            <Alert variant={parsed.problems.length > 0 ? "warning" : "info"}>
-              {fileName}: {validRows} valid row(s)
-              {parsed.problems.length > 0 && `, ${parsed.problems.length} problem(s)`}
-            </Alert>
-            {parsed.problems.length > 0 && (
-              <ul className="text-xs text-amber-700 space-y-0.5 max-h-24 overflow-y-auto">
-                {parsed.problems.map((problem, index) => (
+        {rows.length > 0 && (
+          <Alert variant={validated.problems.length > 0 ? "warning" : "info"}>
+            {validRows} of {rows.length} row(s) ready to import
+            {validated.problems.length > 0 && `, ${validated.problems.length} problem(s)`}
+            {validated.problems.length > 0 && (
+              <ul className="mt-1 text-xs space-y-0.5 max-h-24 overflow-y-auto">
+                {validated.problems.map((problem, index) => (
                   <li key={index}>{problem}</li>
                 ))}
               </ul>
             )}
-          </div>
+          </Alert>
         )}
 
         <div className="flex flex-wrap gap-2">
           <Button
             onClick={handleImport}
             loading={isImporting}
-            disabled={disabled || isImporting || !parsed || validRows === 0}
+            disabled={disabled || isImporting || validRows === 0}
           >
             Import{validRows > 0 ? ` ${validRows} accounts` : ""}
           </Button>

@@ -1,11 +1,11 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Papa from "papaparse";
 import { toast } from "sonner";
 import type { ConnectionTestRow } from "../../api/connectionTest";
 import {
   Alert,
   Button,
-  FilePicker,
+  CsvEditor,
   Input,
   Label,
   Card,
@@ -13,23 +13,26 @@ import {
   CardTitle,
   CardDescription,
   CardContent,
+  type CsvColumn,
+  type CsvRow,
 } from "../ui";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-interface ParsedCsv {
-  rows: ConnectionTestRow[];
-  problems: string[];
-  detectedColumns: 3 | 4;
-}
+const COLUMNS: CsvColumn[] = [
+  { key: "email", label: "Email", required: true },
+  { key: "username", label: "Username", required: true },
+  { key: "password", label: "Password", required: true },
+];
 
 // Accepts both credential CSV formats used elsewhere in the app and picks the
 // right one automatically:
 //   3 columns (migration target / archive): email, username, password
 //   4 columns (migration source): email, targetEmail, username, password
-// The targetEmail column is irrelevant for a login test and is ignored.
-function parseCsv(text: string): ParsedCsv {
-  const result = Papa.parse<string[]>(text.replace(/^﻿/, ""), {
+// The targetEmail column is irrelevant for a login test, so either format
+// collapses to the same 3-field CsvRow shape the table below edits.
+function parseCredentialsFile(text: string): CsvRow[] {
+  const result = Papa.parse<string[]>(text.replace(/^\uFEFF/, ""), {
     skipEmptyLines: "greedy",
   });
 
@@ -51,33 +54,30 @@ function parseCsv(text: string): ParsedCsv {
     detectedColumns = rowsWithFourthCell >= Math.ceil(lines.length / 2) && lines.length > 0 ? 4 : 3;
   }
 
-  const rows: ConnectionTestRow[] = [];
+  return lines.map((line) => ({
+    email: (line[0] ?? "").trim(),
+    username: (line[detectedColumns === 4 ? 2 : 1] ?? "").trim(),
+    password: line[detectedColumns === 4 ? 3 : 2] ?? "",
+  }));
+}
+
+interface Validated {
+  rows: ConnectionTestRow[];
+  problems: string[];
+}
+
+function validateRows(rows: CsvRow[]): Validated {
+  const validRows: ConnectionTestRow[] = [];
   const problems: string[] = [];
   const seen = new Set<string>();
 
-  lines.forEach((line, index) => {
+  rows.forEach((row, index) => {
+    const email = (row.email ?? "").trim().toLowerCase();
+    const username = (row.username ?? "").trim();
+    const password = row.password ?? "";
     const rowNumber = index + 1;
 
-    // A row that disagrees with the detected format would have its columns
-    // misread — flag it instead of testing garbage credentials
-    const hasFourthCell = (line[3] ?? "").trim() !== "";
-    if (detectedColumns === 3 && hasFourthCell) {
-      problems.push(
-        `Row ${rowNumber}: has a 4th column although the file looks like the 3-column format — row skipped`
-      );
-      return;
-    }
-    if (detectedColumns === 4 && !hasFourthCell) {
-      problems.push(
-        `Row ${rowNumber}: missing the 4th column although the file looks like the 4-column format — row skipped`
-      );
-      return;
-    }
-
-    const email = (line[0] ?? "").trim().toLowerCase();
-    const username = (line[detectedColumns === 4 ? 2 : 1] ?? "").trim();
-    const password = line[detectedColumns === 4 ? 3 : 2] ?? "";
-
+    if (!email && !username && !password) return; // blank manual row
     if (!EMAIL_REGEX.test(email)) {
       problems.push(`Row ${rowNumber}: "${email || "(empty)"}" is not a valid email address`);
       return;
@@ -95,10 +95,10 @@ function parseCsv(text: string): ParsedCsv {
       problems.push(`Row ${rowNumber}: duplicate email ${email} — it will be tested again`);
     }
     seen.add(email);
-    rows.push({ email, username, password });
+    validRows.push({ email, username, password });
   });
 
-  return { rows, problems, detectedColumns };
+  return { rows: validRows, problems };
 }
 
 interface ConnectionTestImportCardProps {
@@ -114,20 +114,12 @@ export default function ConnectionTestImportCard({
 }: ConnectionTestImportCardProps) {
   const [imapHost, setImapHost] = useState("");
   const [imapPort, setImapPort] = useState("993");
-  const [parsed, setParsed] = useState<ParsedCsv | null>(null);
-  const [fileName, setFileName] = useState<string | null>(null);
+  const [rows, setRows] = useState<CsvRow[]>([]);
 
-  const handleFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      setFileName(file.name);
-      setParsed(parseCsv(String(reader.result ?? "")));
-    };
-    reader.readAsText(file);
-  };
+  const validated = useMemo(() => validateRows(rows), [rows]);
 
   const handleStart = () => {
-    if (!parsed || parsed.rows.length === 0) return;
+    if (validated.rows.length === 0) return;
     const port = parseInt(imapPort, 10);
     if (!imapHost.trim()) {
       toast.error("Enter the IMAP host first");
@@ -137,10 +129,10 @@ export default function ConnectionTestImportCard({
       toast.error("Enter a valid IMAP port");
       return;
     }
-    onStart(imapHost.trim(), port, parsed.rows);
+    onStart(imapHost.trim(), port, validated.rows);
   };
 
-  const validRows = parsed?.rows.length ?? 0;
+  const validRows = validated.rows.length;
 
   return (
     <Card>
@@ -177,40 +169,36 @@ export default function ConnectionTestImportCard({
         </div>
 
         <div>
-          <Label htmlFor="connection-test-csv-file">CSV File</Label>
-          <FilePicker
-            id="connection-test-csv-file"
-            accept=".csv,text/csv,text/plain"
+          <Label>CSV File</Label>
+          <CsvEditor
+            columns={COLUMNS}
+            rows={rows}
+            onChange={setRows}
             disabled={disabled}
-            title="Choose a CSV file"
-            selection={fileName}
-            onFiles={(files) => handleFile(files[0])}
+            parseFile={parseCredentialsFile}
+            downloadFileName="connection-test-credentials.csv"
+            showRequiredAlert={false}
           />
         </div>
 
-        {parsed && (
-          <div className="space-y-2">
-            <Alert variant={parsed.problems.length > 0 ? "warning" : "info"}>
-              {fileName}: {validRows} valid row(s)
-              {parsed.problems.length > 0 && `, ${parsed.problems.length} problem(s)`} — detected{" "}
-              {parsed.detectedColumns === 4
-                ? "4-column source format (target column ignored)"
-                : "3-column format"}
-            </Alert>
-            {parsed.problems.length > 0 && (
-              <ul className="text-xs text-amber-700 space-y-0.5 max-h-24 overflow-y-auto">
-                {parsed.problems.map((problem, index) => (
+        {rows.length > 0 && (
+          <Alert variant={validated.problems.length > 0 ? "warning" : "info"}>
+            {validRows} of {rows.length} row(s) ready to test
+            {validated.problems.length > 0 && `, ${validated.problems.length} problem(s)`}
+            {validated.problems.length > 0 && (
+              <ul className="mt-1 text-xs space-y-0.5 max-h-24 overflow-y-auto">
+                {validated.problems.map((problem, index) => (
                   <li key={index}>{problem}</li>
                 ))}
               </ul>
             )}
-          </div>
+          </Alert>
         )}
 
         <Button
           onClick={handleStart}
           loading={isStarting}
-          disabled={disabled || isStarting || !parsed || validRows === 0}
+          disabled={disabled || isStarting || validRows === 0}
         >
           Test{validRows > 0 ? ` ${validRows}` : ""} connection{validRows === 1 ? "" : "s"}
         </Button>

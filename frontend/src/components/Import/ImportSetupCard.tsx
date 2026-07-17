@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import Papa from "papaparse";
+import { X } from "lucide-react";
 import { toast } from "sonner";
 import {
   importImportAccounts,
@@ -12,6 +12,7 @@ import {
 import {
   Alert,
   Button,
+  CsvEditor,
   FilePicker,
   Input,
   Label,
@@ -20,9 +21,18 @@ import {
   CardTitle,
   CardDescription,
   CardContent,
+  type CsvColumn,
+  type CsvRow,
 } from "../ui";
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const COLUMNS: CsvColumn[] = [
+  { key: "email", label: "Email", required: true },
+  { key: "username", label: "Username", required: true },
+  { key: "password", label: "Password", required: true },
+  { key: "zipFileName", label: "Zip File Name", required: true, placeholder: "archive.zip" },
+];
 
 // Mirror of the backend's sanitizeZipFileName so the matching table shows the
 // same verdict the server will reach (the server's result stays authoritative)
@@ -48,34 +58,24 @@ function formatBytes(bytes: number): string {
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`;
 }
 
-interface ParsedCsv {
+interface Validated {
   rows: ImportAccountRow[];
   problems: string[];
 }
 
-// Fixed column order: email, username, password, zip file name. A first row
-// whose first cell looks like a header ("email", "E-Mail", ...) is dropped.
-function parseCsv(text: string): ParsedCsv {
-  const result = Papa.parse<string[]>(text.replace(/^﻿/, ""), {
-    skipEmptyLines: "greedy",
-  });
-
-  let lines = result.data;
-  if (lines.length > 0 && /e-?mail/i.test(lines[0][0] ?? "")) {
-    lines = lines.slice(1);
-  }
-
-  const rows: ImportAccountRow[] = [];
+function validateRows(rows: CsvRow[]): Validated {
+  const validRows: ImportAccountRow[] = [];
   const problems: string[] = [];
   const seen = new Set<string>();
 
-  lines.forEach((line, index) => {
-    const email = (line[0] ?? "").trim().toLowerCase();
-    const username = (line[1] ?? "").trim();
-    const password = line[2] ?? "";
-    const zipFileName = (line[3] ?? "").trim();
+  rows.forEach((row, index) => {
+    const email = (row.email ?? "").trim().toLowerCase();
+    const username = (row.username ?? "").trim();
+    const password = row.password ?? "";
+    const zipFileName = (row.zipFileName ?? "").trim();
     const rowNumber = index + 1;
 
+    if (!email && !username && !password && !zipFileName) return; // blank manual row
     if (!EMAIL_REGEX.test(email)) {
       problems.push(`Row ${rowNumber}: "${email || "(empty)"}" is not a valid email address`);
       return;
@@ -96,10 +96,10 @@ function parseCsv(text: string): ParsedCsv {
       problems.push(`Row ${rowNumber}: duplicate email ${email} — the last occurrence will be used`);
     }
     seen.add(email);
-    rows.push({ email, username, password, zipFileName });
+    validRows.push({ email, username, password, zipFileName });
   });
 
-  return { rows, problems };
+  return { rows: validRows, problems };
 }
 
 interface ImportSetupCardProps {
@@ -117,52 +117,60 @@ export default function ImportSetupCard({
 }: ImportSetupCardProps) {
   const [imapHost, setImapHost] = useState("");
   const [imapPort, setImapPort] = useState("993");
-  const [parsed, setParsed] = useState<ParsedCsv | null>(null);
-  const [csvFileName, setCsvFileName] = useState<string | null>(null);
+  const [rows, setRows] = useState<CsvRow[]>([]);
   const [zipFiles, setZipFiles] = useState<File[]>([]);
   const [isImporting, setIsImporting] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [isClearing, setIsClearing] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
 
-  const handleCsvFile = (file: File) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      setCsvFileName(file.name);
-      setParsed(parseCsv(String(reader.result ?? "")));
-    };
-    reader.readAsText(file);
+  const validated = useMemo(() => validateRows(rows), [rows]);
+
+  // Each file-dialog interaction only hands back the files just picked, not
+  // previous ones — merge instead of replacing, so re-opening the picker to
+  // add one more zip doesn't drop what was already selected. Re-picking a
+  // zip with the same (sanitized) name replaces just that entry, so a bad
+  // file can be swapped out by picking the corrected one again.
+  const handleZipSelection = (files: File[]) => {
+    const zips = files.filter((file) => /\.zip$/i.test(file.name));
+    if (files.length > 0 && zips.length === 0) {
+      toast.warning("The selection contains no .zip files");
+      return;
+    }
+    if (zips.length === 0) return;
+    setZipFiles((prev) => {
+      const bySanitizedName = new Map(prev.map((file) => [sanitizeZipFileName(file.name), file]));
+      for (const zip of zips) {
+        bySanitizedName.set(sanitizeZipFileName(zip.name), zip);
+      }
+      return [...bySanitizedName.values()];
+    });
   };
 
-  const handleFolderSelection = (files: File[]) => {
-    const zips = files.filter((file) => /\.zip$/i.test(file.name));
-    setZipFiles(zips);
-    if (files.length > 0 && zips.length === 0) {
-      toast.warning("The selected folder contains no .zip files");
-    }
+  const removeZipFile = (fileToRemove: File) => {
+    setZipFiles((prev) => prev.filter((file) => file !== fileToRemove));
   };
 
   const resetSelection = () => {
-    setParsed(null);
-    setCsvFileName(null);
+    setRows([]);
     setZipFiles([]);
   };
 
   // Match every CSV row against the selected zip files by sanitized basename
   const matching = useMemo(() => {
     const filesByName = new Map(zipFiles.map((file) => [sanitizeZipFileName(file.name), file]));
-    const rows = (parsed?.rows ?? []).map((row) => {
+    const matchRows = validated.rows.map((row) => {
       const wanted = sanitizeZipFileName(row.zipFileName);
       return { row, wanted, file: filesByName.get(wanted) ?? null };
     });
-    const wantedNames = new Set(rows.map((entry) => entry.wanted));
+    const wantedNames = new Set(matchRows.map((entry) => entry.wanted));
     const unreferenced = zipFiles.filter((file) => !wantedNames.has(sanitizeZipFileName(file.name)));
-    const missing = rows.filter((entry) => !entry.file);
-    return { rows, unreferenced, missing };
-  }, [parsed, zipFiles]);
+    const missing = matchRows.filter((entry) => !entry.file);
+    return { rows: matchRows, unreferenced, missing };
+  }, [validated, zipFiles]);
 
   const handleImport = async () => {
-    if (!parsed || parsed.rows.length === 0) return;
+    if (validated.rows.length === 0) return;
     const port = parseInt(imapPort, 10);
     if (!imapHost.trim()) {
       toast.error("Enter the IMAP host first");
@@ -178,7 +186,7 @@ export default function ImportSetupCard({
       const result = await importImportAccounts({
         imapHost: imapHost.trim(),
         imapPort: port,
-        accounts: parsed.rows,
+        accounts: validated.rows,
       });
       result.warnings.forEach((warning) => toast.warning(warning));
 
@@ -247,7 +255,7 @@ export default function ImportSetupCard({
     }
   };
 
-  const validRows = parsed?.rows.length ?? 0;
+  const validRows = validated.rows.length;
 
   return (
     <Card>
@@ -284,24 +292,38 @@ export default function ImportSetupCard({
         </div>
 
         <div>
-          <Label htmlFor="import-csv-file">CSV File (email, username, password, zip file name)</Label>
-          <FilePicker
-            id="import-csv-file"
-            accept=".csv,text/csv,text/plain"
+          <Label>CSV File (email, username, password, zip file name)</Label>
+          <CsvEditor
+            columns={COLUMNS}
+            rows={rows}
+            onChange={setRows}
             disabled={disabled}
-            title="Choose a CSV file"
-            selection={csvFileName}
-            onFiles={(files) => handleCsvFile(files[0])}
+            downloadFileName="import-accounts.csv"
+            showRequiredAlert={false}
           />
         </div>
 
         <div>
-          <Label htmlFor="import-zip-folder">Folder with the archive zips</Label>
+          <div className="flex items-center justify-between">
+            <Label htmlFor="import-zip-files">Archive zips</Label>
+            {zipFiles.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setZipFiles([])}
+                disabled={disabled}
+                className="text-xs text-neutral-500 underline hover:text-neutral-700 disabled:opacity-50"
+              >
+                Clear all
+              </button>
+            )}
+          </div>
           <FilePicker
-            id="import-zip-folder"
-            directory
+            id="import-zip-files"
+            accept=".zip"
+            allowDirectory
             disabled={disabled}
-            title="Choose the folder containing the zips"
+            title="Choose one or more zip files"
+            selectedHint="Click or drop to add more — pick a same-named zip again to replace it"
             selection={
               zipFiles.length > 0
                 ? `${zipFiles.length} zip file(s) selected (${formatBytes(
@@ -309,27 +331,25 @@ export default function ImportSetupCard({
                   )})`
                 : null
             }
-            onFiles={handleFolderSelection}
+            onFiles={handleZipSelection}
           />
         </div>
 
-        {parsed && (
-          <div className="space-y-2">
-            <Alert variant={parsed.problems.length > 0 ? "warning" : "info"}>
-              {csvFileName}: {validRows} valid row(s)
-              {parsed.problems.length > 0 && `, ${parsed.problems.length} problem(s)`}
-            </Alert>
-            {parsed.problems.length > 0 && (
-              <ul className="text-xs text-amber-700 space-y-0.5 max-h-24 overflow-y-auto">
-                {parsed.problems.map((problem, index) => (
+        {rows.length > 0 && (
+          <Alert variant={validated.problems.length > 0 ? "warning" : "info"}>
+            {validRows} of {rows.length} row(s) ready to import
+            {validated.problems.length > 0 && `, ${validated.problems.length} problem(s)`}
+            {validated.problems.length > 0 && (
+              <ul className="mt-1 text-xs space-y-0.5 max-h-24 overflow-y-auto">
+                {validated.problems.map((problem, index) => (
                   <li key={index}>{problem}</li>
                 ))}
               </ul>
             )}
-          </div>
+          </Alert>
         )}
 
-        {parsed && validRows > 0 && (
+        {validRows > 0 && (
           <div>
             <h3 className="text-sm font-medium text-neutral-700 mb-2">Zip matching</h3>
             <ul className="divide-y divide-neutral-200 border border-neutral-200 rounded-lg max-h-48 overflow-y-auto">
@@ -340,8 +360,17 @@ export default function ImportSetupCard({
                     <span className="text-neutral-400"> → {entry.wanted}</span>
                   </span>
                   {entry.file ? (
-                    <span className="shrink-0 text-xs text-green-700">
+                    <span className="shrink-0 flex items-center gap-1.5 text-xs text-green-700">
                       ✓ {formatBytes(entry.file.size)}
+                      <button
+                        type="button"
+                        onClick={() => removeZipFile(entry.file!)}
+                        disabled={disabled}
+                        className="text-green-700/60 hover:text-red-600 disabled:opacity-50"
+                        aria-label={`Remove ${entry.file.name}`}
+                      >
+                        <X className="size-3.5" />
+                      </button>
                     </span>
                   ) : (
                     <span className="shrink-0 text-xs text-red-600">zip not in folder</span>
@@ -349,10 +378,35 @@ export default function ImportSetupCard({
                 </li>
               ))}
             </ul>
-            {matching.unreferenced.length > 0 && (
+          </div>
+        )}
+
+        {matching.unreferenced.length > 0 && (
+          <div>
+            <h3 className="text-sm font-medium text-neutral-700 mb-2">
+              {validRows > 0 ? "Unmatched zips" : "Selected zips"} ({matching.unreferenced.length})
+            </h3>
+            <ul className="divide-y divide-neutral-200 border border-neutral-200 rounded-lg max-h-48 overflow-y-auto">
+              {matching.unreferenced.map((file) => (
+                <li key={file.name} className="px-4 py-1.5 flex justify-between items-center gap-4 text-sm">
+                  <span className="text-neutral-700 truncate">
+                    {file.name} <span className="text-neutral-400">({formatBytes(file.size)})</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeZipFile(file)}
+                    disabled={disabled}
+                    className="shrink-0 text-neutral-400 hover:text-red-600 disabled:opacity-50"
+                    aria-label={`Remove ${file.name}`}
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {validRows > 0 && (
               <p className="text-xs text-neutral-500 mt-1">
-                {matching.unreferenced.length} zip(s) in the folder are not referenced by any CSV
-                row and will not be uploaded.
+                Not referenced by any CSV row — these will not be uploaded.
               </p>
             )}
           </div>
@@ -362,7 +416,7 @@ export default function ImportSetupCard({
           <Button
             onClick={handleImport}
             loading={isImporting}
-            disabled={disabled || isImporting || !parsed || validRows === 0}
+            disabled={disabled || isImporting || validRows === 0}
           >
             {uploadProgress
               ? `Uploading ${uploadProgress}`
