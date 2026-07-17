@@ -431,6 +431,8 @@ model User {
   sessions      Session[]
   accounts      Account[]
 
+  ssoproviders SsoProvider[]
+
   @@unique([email])
   @@map("user")
 }
@@ -481,4 +483,19 @@ model Verification {
 
   @@index([identifier])
   @@map("verification")
+}
+
+model SsoProvider {
+  id             String  @id
+  issuer         String
+  oidcConfig     String?
+  samlConfig     String?
+  userId         String?
+  user           User?   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  providerId     String
+  organizationId String?
+  domain         String
+
+  @@unique([providerId])
+  @@map("ssoProvider")
 }

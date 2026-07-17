@@ -5,7 +5,7 @@ dotenv.config();
 import express from "express";
 import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
-import { auth } from "./src/lib/auth";
+import { auth, samlEnabled, samlProviderId } from "./src/lib/auth";
 import prisma from "./src/utils/prisma";
 import mailAccountsRouter from "./src/routes/mailAccounts";
 import automationFlowsRouter from "./src/routes/automationFlows";
@@ -31,7 +31,11 @@ const PORT = process.env.PORT || 4000;
 // frontend keeps its /api/auth/setup-status URL.
 app.get("/api/auth/setup-status", async (_req, res) => {
   try {
-    res.json({ needsSetup: (await prisma.user.count()) === 0 });
+    res.json({
+      needsSetup: (await prisma.user.count()) === 0,
+      ssoEnabled: samlEnabled,
+      ssoProviderId: samlEnabled ? samlProviderId : undefined,
+    });
   } catch (error) {
     res.status(500).json({ error: "Failed to check setup status" });
   }

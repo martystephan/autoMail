@@ -19,6 +19,16 @@ services:
       - DISABLE_MICROSOFT_OAUTH=${DISABLE_MICROSOFT_OAUTH:-false}
       - JWT_SECRET=${JWT_SECRET:-c58b3ef746659c77b64825b84057b0e8d1ddaa7c3f3370e164861fc15672cb49}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-0b4abe64baa185ee0a47cc847bccbb542739ecd316579da93f64ab152dd2230c}
+      # Optional SAML SSO — leave SAML_ENABLED unset/false to keep local
+      # email/password as the only sign-in method. See backend/.env.example.
+      - SAML_ENABLED=${SAML_ENABLED:-false}
+      - SAML_PROVIDER_ID=${SAML_PROVIDER_ID:-default-saml}
+      - SAML_DOMAIN=${SAML_DOMAIN}
+      - SAML_ENTRY_POINT=${SAML_ENTRY_POINT}
+      - SAML_IDP_ENTITY_ID=${SAML_IDP_ENTITY_ID}
+      - SAML_CERT=${SAML_CERT}
+      - SAML_ISSUER=${SAML_ISSUER}
+      - SAML_IDENTIFIER_FORMAT=${SAML_IDENTIFIER_FORMAT:-urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress}
     volumes:
       - sqlite-data:/app/data
     networks:

@@ -4,6 +4,8 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || "/api";
 
 export interface SetupStatus {
   needsSetup: boolean;
+  ssoEnabled: boolean;
+  ssoProviderId?: string;
 }
 
 // Sign-in/up/out go through the better-auth client (src/lib/authClient.ts);

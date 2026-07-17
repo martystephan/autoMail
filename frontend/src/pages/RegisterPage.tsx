@@ -8,7 +8,8 @@ export default function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const { register } = useAuth();
+  const [ssoLoading, setSsoLoading] = useState(false);
+  const { register, ssoEnabled, loginWithSso } = useAuth();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -32,6 +33,18 @@ export default function RegisterPage() {
       toast.error(err.message || "Registration failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSsoRegister() {
+    setSsoLoading(true);
+    try {
+      // On success the browser navigates away to the IdP; this only
+      // resolves here if the request itself failed.
+      await loginWithSso();
+    } catch (err: any) {
+      toast.error(err.message || "SSO sign-in failed");
+      setSsoLoading(false);
     }
   }
 
@@ -84,6 +97,29 @@ export default function RegisterPage() {
             {loading ? "Creating account..." : "Create Account"}
           </Button>
         </form>
+
+        {ssoEnabled && (
+          <>
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t border-neutral-200" />
+              </div>
+              <div className="relative flex justify-center text-xs">
+                <span className="bg-white px-2 text-neutral-500">or</span>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant="secondary"
+              loading={ssoLoading}
+              className="w-full"
+              onClick={handleSsoRegister}
+            >
+              {ssoLoading ? "Redirecting..." : "Create account with SSO"}
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

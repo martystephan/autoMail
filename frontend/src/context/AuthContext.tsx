@@ -12,8 +12,10 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   needsSetup: boolean;
+  ssoEnabled: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
+  loginWithSso: () => Promise<void>;
   logout: () => Promise<void>;
 }
 
@@ -23,10 +25,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const { data: session, isPending } = authClient.useSession();
   const [needsSetup, setNeedsSetup] = useState(false);
   const [setupLoading, setSetupLoading] = useState(true);
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [ssoProviderId, setSsoProviderId] = useState<string | undefined>();
 
   useEffect(() => {
     getSetupStatus()
-      .then((status) => setNeedsSetup(status.needsSetup))
+      .then((status) => {
+        setNeedsSetup(status.needsSetup);
+        setSsoEnabled(status.ssoEnabled);
+        setSsoProviderId(status.ssoProviderId);
+      })
       .catch(() => setNeedsSetup(false))
       .finally(() => setSetupLoading(false));
   }, []);
@@ -52,14 +60,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await authClient.signOut();
   }
 
+  // The provider ID only becomes known once /auth/setup-status resolves.
+  // The single-admin invariant (SSO may create the first user, never a
+  // second) is enforced server-side in auth.ts's provisionUser hook, not
+  // here — the plugin's requestSignUp override isn't wired up for SAML.
+  async function loginWithSso() {
+    if (!ssoProviderId) throw new Error("SSO is not configured");
+    const { error } = await authClient.signIn.sso({
+      providerId: ssoProviderId,
+      // Must be absolute: the SAML callback is handled on the backend
+      // origin, and a relative "/" would resolve against that origin
+      // instead of the frontend's.
+      callbackURL: `${window.location.origin}/`,
+    });
+    if (error) throw new Error(error.message || "SSO sign-in failed");
+    // On success the browser navigates away to the IdP; this line is only
+    // reached on failure.
+  }
+
   return (
     <AuthContext.Provider
       value={{
         user: session?.user ?? null,
         isLoading: isPending || setupLoading,
         needsSetup,
+        ssoEnabled,
         login,
         register,
+        loginWithSso,
         logout,
       }}
     >

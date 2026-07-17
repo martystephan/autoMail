@@ -7,7 +7,8 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
-  const { login } = useAuth();
+  const [ssoLoading, setSsoLoading] = useState(false);
+  const { login, ssoEnabled, loginWithSso } = useAuth();
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -21,6 +22,18 @@ export default function LoginPage() {
       toast.error(err.message || "Login failed");
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleSsoLogin() {
+    setSsoLoading(true);
+    try {
+      // On success the browser navigates away to the IdP; this only
+      // resolves here if the request itself failed.
+      await loginWithSso();
+    } catch (err: any) {
+      toast.error(err.message || "SSO sign-in failed");
+      setSsoLoading(false);
     }
   }
 
@@ -61,6 +74,29 @@ export default function LoginPage() {
             {loading ? "Signing in..." : "Sign In"}
           </Button>
         </form>
+
+        {ssoEnabled && (
+          <>
+            <div className="relative my-6">
+              <div className="absolute inset-0 flex items-center">
+                <span className="w-full border-t border-neutral-200" />
+              </div>
+              <div className="relative flex justify-center text-xs">
+                <span className="bg-white px-2 text-neutral-500">or</span>
+              </div>
+            </div>
+
+            <Button
+              type="button"
+              variant="secondary"
+              loading={ssoLoading}
+              className="w-full"
+              onClick={handleSsoLogin}
+            >
+              {ssoLoading ? "Redirecting..." : "Sign in with SSO"}
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

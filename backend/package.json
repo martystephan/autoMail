@@ -13,6 +13,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "@better-auth/sso": "^1.6.23",
     "@prisma/client": "^6.19.3",
     "archiver": "^8.0.0",
     "better-auth": "^1.6.23",
