@@ -14,9 +14,30 @@ import {
 } from "../../api/import";
 import ImportSetupCard from "./ImportSetupCard";
 import ImportRunProgress from "./ImportRunProgress";
-import { Button } from "../ui";
+import { Button, Card, CardContent } from "../ui";
 
 const POLL_INTERVAL_MS = 2000;
+
+const AI_CLEANUP_PROMPT = `I have raw mail account data that I need to turn into ONE CSV file for a bulk email import tool. Please clean and convert my data into exactly this format:
+
+CSV columns in this order:
+email,username,password,zipFileName
+- email: the account's email address, lowercase
+- username: the IMAP login of the account (often identical to the email)
+- password: the account's password, exactly as given
+- zipFileName: the name of that account's archive zip file, ending in ".zip"
+
+STRICT RULES:
+1. Lowercase and trim all email addresses. Keep usernames and passwords unchanged apart from trimming surrounding whitespace.
+2. Use a comma as the separator. Wrap a value in double quotes if it contains a comma, quote, or semicolon.
+3. The first line must be the header row exactly as shown above.
+4. No duplicate email addresses. No empty usernames, passwords, or zip file names.
+5. Put rows that are incomplete, ambiguous, or missing credentials into a separate "problems" list instead of the CSV.
+
+Output the CSV as a single code block, followed by the list of problems.
+
+Here is my raw data:
+[paste your raw data here]`;
 
 function finishedToast(status: MigrationJobStatus, detail: ImportRunDetail) {
   const { completedAccounts, failedAccounts } = detail.run;
@@ -44,6 +65,18 @@ export default function ImportPanel() {
   const [isStarting, setIsStarting] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
   const [isDeletingRun, setIsDeletingRun] = useState(false);
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  const handleCopyPrompt = async () => {
+    try {
+      await navigator.clipboard.writeText(AI_CLEANUP_PROMPT);
+      toast.success("Prompt copied to clipboard");
+    } catch {
+      // Clipboard access denied (e.g. non-HTTPS) — show the text to copy manually
+      setShowPrompt(true);
+      toast.error("Could not access the clipboard — copy the prompt manually");
+    }
+  };
 
   const loadOverview = useCallback(async () => {
     try {
@@ -192,6 +225,34 @@ export default function ImportPanel() {
 
   return (
     <div className="space-y-4">
+      <Card>
+        <CardContent className="py-3 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-sm text-neutral-700">
+              <span className="font-medium">Messy account data?</span>{" "}
+              Let an AI clean it up first — the prompt produces the CSV file in the right format.
+            </div>
+            <div className="flex gap-2 shrink-0">
+              <Button variant="secondary" size="sm" onClick={handleCopyPrompt}>
+                Copy prompt
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setShowPrompt((prev) => !prev)}
+              >
+                {showPrompt ? "Hide" : "Show"}
+              </Button>
+            </div>
+          </div>
+          {showPrompt && (
+            <pre className="text-xs text-neutral-600 bg-neutral-50 border border-neutral-200 rounded-lg p-3 whitespace-pre-wrap max-h-72 overflow-y-auto">
+              {AI_CLEANUP_PROMPT}
+            </pre>
+          )}
+        </CardContent>
+      </Card>
+
       <p className="text-xs text-neutral-500">
         Import restores archive zips created on the Archive tab: folders are recreated on the
         target account (Sent, Trash etc. are mapped to the target's own special folders) and every
