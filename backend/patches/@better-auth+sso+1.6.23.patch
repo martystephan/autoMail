@@ -1,0 +1,13 @@
+diff --git a/node_modules/@better-auth/sso/dist/index.mjs b/node_modules/@better-auth/sso/dist/index.mjs
+index 23dea59..1577d7c 100644
+--- a/node_modules/@better-auth/sso/dist/index.mjs
++++ b/node_modules/@better-auth/sso/dist/index.mjs
+@@ -2023,7 +2023,7 @@ async function processSAMLResponse(ctx, params, options) {
+ 			error_description: "SAML response binding could not be validated"
+ 		}));
+ 	}
+-	const inResponseTo = extract.inResponseTo;
++	const inResponseTo = extract.response?.inResponseTo;
+ 	if (options?.saml?.enableInResponseToValidation !== false) {
+ 		const allowIdpInitiated = options?.saml?.allowIdpInitiated !== false;
+ 		if (inResponseTo) {

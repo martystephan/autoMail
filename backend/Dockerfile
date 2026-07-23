@@ -6,8 +6,10 @@ RUN apk add --no-cache openssl python3 make g++
 
 WORKDIR /app
 
-# Install dependencies (including dev for ts-node)
+# Install dependencies (including dev for ts-node). patches/ must be present
+# before npm ci runs its postinstall hook (patch-package).
 COPY package*.json ./
+COPY patches ./patches
 RUN npm ci
 
 # Copy source
